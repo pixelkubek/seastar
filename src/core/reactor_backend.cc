@@ -1864,7 +1864,119 @@ public:
 };
 
 class reactor_backend_asymmetric_uring final : public reactor_backend {
+    // s_queue_len is more or less arbitrary. Too low and we'll be
+    // issuing too small batches, too high and we require too much locked
+    // memory, but otherwise it doesn't matter.
+    static constexpr unsigned s_queue_len = 200;
+    reactor& _r;
+    ::io_uring _uring;
+    bool _did_work_while_getting_sqe = false;
+    bool _has_pending_submissions = false;
+    file_desc _hrtimer_timerfd;
+    preempt_io_context _preempt_io_context;
+
+    class uring_pollable_fd_state : public pollable_fd_state {
+        pollable_fd_state_completion _completion_pollin;
+        pollable_fd_state_completion _completion_pollout;
+        pollable_fd_state_completion _completion_pollrdhup;
+    public:
+        explicit uring_pollable_fd_state(file_desc desc, speculation speculate)
+                : pollable_fd_state(std::move(desc), std::move(speculate)) {
+        }
+        pollable_fd_state_completion* get_desc(int events) {
+            return nullptr;
+        }
+        future<> get_completion_future(int events) {
+            return make_ready_future<>();
+        }
+    };
+
+    // eventfd and timerfd both need an 8-byte read after completion
+    class recurring_eventfd_or_timerfd_completion : public fd_kernel_completion {
+        bool _armed = false;
+    public:
+        explicit recurring_eventfd_or_timerfd_completion(file_desc& fd) : fd_kernel_completion(fd) {}
+        virtual void complete_with(ssize_t res) override {
+        }
+        void maybe_rearm(reactor_backend_asymmetric_uring& be) {
+        }
+    };
+
+    // Completion for high resolution timerfd, used in wait_and_process_events()
+    // (while running tasks it's waited for in _preempt_io_context)
+    class hrtimer_completion : public recurring_eventfd_or_timerfd_completion {
+        reactor& _r;
+    public:
+        explicit hrtimer_completion(reactor& r, file_desc& timerfd)
+                : recurring_eventfd_or_timerfd_completion(timerfd), _r(r) {
+        }
+        virtual void complete_with(ssize_t res) override {
+        }
+    };
+
+    using smp_wakeup_completion = recurring_eventfd_or_timerfd_completion;
+
+    hrtimer_completion _hrtimer_completion;
+    smp_wakeup_completion _smp_wakeup_completion;
+private:
+    static file_desc make_timerfd() {
+        return file_desc::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK);
+    }
+
+    // Can fail if the completion queue is full
+    ::io_uring_sqe* try_get_sqe() {
+        return nullptr;
+    }
+
+    bool do_flush_submission_ring() {
+        return false;
+    }
+
+    ::io_uring_sqe* get_sqe() {
+        return nullptr;
+    }
+
+    future<> poll(pollable_fd_state& fd, int events) {
+        return make_ready_future<>();
+    }
+
+    void submit_io_request(const internal::io_request& req, io_completion* completion) {
+    }
+
+    // Returns true if any work was done
+    bool queue_pending_file_io() {
+        return false;
+    }
+
+    // Process kernel completions already extracted from the ring.
+    // This is needed because we sometimes extract completions without
+    // waiting, and sometimes with waiting.
+    void do_process_ready_kernel_completions(::io_uring_cqe** buf, size_t nr) {
+    }
+
+    // Returns true if completions were processed
+    bool do_process_kernel_completions_step() {
+        return false;
+    }
+
+    // Returns true if completions were processed
+    bool do_process_kernel_completions() {
+        return false;
+    }
+
+    template<typename Completion>
+    auto submit_request(std::unique_ptr<Completion> desc, io_request&& req) noexcept {
+    }
 public:
+    explicit reactor_backend_asymmetric_uring(reactor& r)
+            : _r(r)
+            , _uring(try_create_uring(s_queue_len, true).value())
+            , _hrtimer_timerfd(make_timerfd())
+            , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
+            , _hrtimer_completion(_r, _hrtimer_timerfd)
+            , _smp_wakeup_completion(_r._notify_eventfd) {
+    }
+
     ~reactor_backend_asymmetric_uring() {
     }
 

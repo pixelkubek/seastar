@@ -1957,16 +1957,29 @@ private:
     // This is needed because we sometimes extract completions without
     // waiting, and sometimes with waiting.
     void do_process_ready_kernel_completions(::io_uring_cqe** buf, size_t nr) {
+        for (auto p = buf; p != buf + nr; ++p) {
+            auto cqe = *p;
+            auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
+            completion->complete_with(cqe->res);
+        }
     }
 
     // Returns true if completions were processed
     bool do_process_kernel_completions_step() {
-        return false;
+        struct ::io_uring_cqe* buf[s_queue_len];
+        auto n = ::io_uring_peek_batch_cqe(&_uring, buf, s_queue_len);
+        do_process_ready_kernel_completions(buf, n);
+        ::io_uring_cq_advance(&_uring, n);
+        return n != 0;
     }
 
     // Returns true if completions were processed
     bool do_process_kernel_completions() {
-        return false;
+        auto did_work = false;
+        while (do_process_kernel_completions_step()) {
+            did_work = true;
+        }
+        return did_work | std::exchange(_did_work_while_getting_sqe, false);
     }
 
     template<typename Completion>

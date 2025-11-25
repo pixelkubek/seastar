@@ -1928,7 +1928,7 @@ private:
 
     // Can fail if the completion queue is full
     ::io_uring_sqe* try_get_sqe() {
-        return nullptr;
+        return ::io_uring_get_sqe(&_uring);
     }
 
     bool do_flush_submission_ring() {

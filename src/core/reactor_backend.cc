@@ -1984,6 +1984,9 @@ private:
 
     template<typename Completion>
     auto submit_request(std::unique_ptr<Completion> desc, io_request&& req) noexcept {
+        auto fut = desc->get_future();
+        _r._io_sink.submit(desc.release(), std::move(req));
+        return fut;
     }
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)

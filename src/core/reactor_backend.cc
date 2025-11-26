@@ -1990,33 +1990,7 @@ public:
 
 #if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
-        if (fd.take_speculation(EPOLLOUT)) {
-            try {
-                auto r = fd.fd.send(buffer, len, MSG_NOSIGNAL | MSG_DONTWAIT);
-                if (r) {
-                    if (size_t(*r) == len) {
-                        fd.speculate_epoll(EPOLLOUT);
-                    }
-                    return make_ready_future<size_t>(*r);
-                }
-            } catch (...) {
-                return current_exception_as_future<size_t>();
-            }
-        }
-        class send_completion final : public send_completion_base {
-            pollable_fd_state& _fd;
-        public:
-            send_completion(pollable_fd_state& fd, size_t to_write)
-                : send_completion_base(to_write)
-                , _fd(fd) {}
-            void complete(size_t bytes) noexcept final {
-                if (bytes == to_write()) {
-                    _fd.speculate_epoll(EPOLLOUT);
-                }
-                send_completion_base::complete(bytes);
-            }
-        };
-        auto desc = std::make_unique<send_completion>(fd, len);
+        auto desc = std::make_unique<send_completion_base>(fd, len);
         auto req = internal::io_request::make_send(fd.fd.get(), buffer, len, MSG_NOSIGNAL);
         return submit_request(std::move(desc), std::move(req));
     }

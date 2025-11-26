@@ -1999,8 +1999,9 @@ public:
 #endif
 
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
-        return make_ready_future<temporary_buffer<char>>();
-
+        auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
+        auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
+        return submit_request(std::move(desc), std::move(req));
     }
 };
 

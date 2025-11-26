@@ -1992,7 +1992,9 @@ public:
 
 #if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
-        return make_ready_future<size_t>();
+        auto desc = std::make_unique<send_completion_base>(fd, len);
+        auto req = internal::io_request::make_send(fd.fd.get(), buffer, len, MSG_NOSIGNAL);
+        return submit_request(std::move(desc), std::move(req));
     }
 #endif
 

@@ -1983,36 +1983,7 @@ public:
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
-        if (fd.take_speculation(EPOLLOUT)) {
-            ::msghdr mh = {};
-            mh.msg_iov = iovs.data();
-            mh.msg_iovlen = std::min<size_t>(iovs.size(), IOV_MAX);
-            try {
-                auto r = fd.fd.sendmsg(&mh, MSG_NOSIGNAL | MSG_DONTWAIT);
-                if (r) {
-                    if (size_t(*r) == len) {
-                        fd.speculate_epoll(EPOLLOUT);
-                    }
-                    return make_ready_future<size_t>(*r);
-                }
-            } catch (...) {
-                return current_exception_as_future<size_t>();
-            }
-        }
-        class sendmsg_completion final : public sendmsg_completion_base {
-            pollable_fd_state& _fd;
-        public:
-            sendmsg_completion(pollable_fd_state& fd, std::span<iovec> iovs, size_t len)
-                : sendmsg_completion_base(iovs, len)
-                , _fd(fd) {}
-            void complete(size_t bytes) noexcept final {
-                if (bytes == to_write()) {
-                    _fd.speculate_epoll(EPOLLOUT);
-                }
-                sendmsg_completion_base::complete(bytes);
-            }
-        };
-        auto desc = std::make_unique<sendmsg_completion>(fd, iovs, len);
+        auto desc = std::make_unique<sendmsg_completion_base>(iovs, len);
         auto req = internal::io_request::make_sendmsg(fd.fd.get(), desc->msghdr(), MSG_NOSIGNAL);
         return submit_request(std::move(desc), std::move(req));
     }

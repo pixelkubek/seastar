@@ -1957,18 +1957,7 @@ public:
     }
 
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {
-        class connect_completion final : public connect_completion_base {
-            pollable_fd_state& _fd;
-        public:
-            connect_completion(pollable_fd_state& fd, const socket_address& sa)
-                : connect_completion_base(sa)
-                , _fd(fd) {}
-            void complete(size_t fd) noexcept final {
-                _fd.speculate_epoll(POLLOUT);
-                connect_completion_base::complete(fd);
-            }
-        };
-        auto desc = std::make_unique<connect_completion>(fd, sa);
+        auto desc = std::make_unique<connect_completion_base>(sa);
         auto req = internal::io_request::make_connect(fd.fd.get(), desc->posix_sockaddr(), desc->socklen());
         return submit_request(std::move(desc), std::move(req));
     }

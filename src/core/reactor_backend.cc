@@ -1959,7 +1959,9 @@ public:
     }
 
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {
-        return make_ready_future<>();
+        auto desc = std::make_unique<connect_completion_base>(sa);
+        auto req = internal::io_request::make_connect(fd.fd.get(), desc->posix_sockaddr(), desc->socklen());
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {

@@ -1970,36 +1970,7 @@ public:
     }
 
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {
-        if (fd.take_speculation(POLLIN)) {
-            ::msghdr mh = {};
-            mh.msg_iov = const_cast<iovec*>(iov.data());
-            mh.msg_iovlen = iov.size();
-            try {
-                auto r = fd.fd.recvmsg(&mh, MSG_DONTWAIT);
-                if (r) {
-                    if (size_t(*r) == internal::iovec_len(iov)) {
-                        fd.speculate_epoll(EPOLLIN);
-                    }
-                    return make_ready_future<size_t>(*r);
-                }
-            } catch (...) {
-                return current_exception_as_future<size_t>();
-            }
-        }
-        class recvmsg_completion final : public recvmsg_completion_base {
-            pollable_fd_state& _fd;
-        public:
-            recvmsg_completion(pollable_fd_state& fd, const std::vector<iovec>& iov)
-                : recvmsg_completion_base(iov)
-                , _fd(fd) {}
-            void complete(size_t bytes) noexcept final {
-                if (bytes == internal::iovec_len(_iov)) {
-                    _fd.speculate_epoll(EPOLLIN);
-                }
-                recvmsg_completion_base::complete(bytes);
-            }
-        };
-        auto desc = std::make_unique<recvmsg_completion>(fd, iov);
+        auto desc = std::make_unique<recvmsg_completion_base>(iov);
         auto req = internal::io_request::make_recvmsg(fd.fd.get(), desc->msghdr(), 0);
         return submit_request(std::move(desc), std::move(req));
     }

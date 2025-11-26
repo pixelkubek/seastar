@@ -1972,7 +1972,9 @@ public:
     }
 
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {
-        return make_ready_future<size_t>();
+        auto desc = std::make_unique<recvmsg_completion_base>(iov);
+        auto req = internal::io_request::make_recvmsg(fd.fd.get(), desc->msghdr(), 0);
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {

@@ -1965,7 +1965,10 @@ public:
     }
 
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {
-        return make_ready_future<size_t>();
+        auto desc = std::make_unique<promise_size_completion_base>();
+        const uint64_t position_file_offset = -1;
+        auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, buffer, len, false);
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {

@@ -1943,7 +1943,19 @@ public:
     }
 
     virtual future<std::tuple<pollable_fd, socket_address>> accept(pollable_fd_state& listenfd) override {
-        return make_ready_future<std::tuple<pollable_fd, socket_address>>();
+        class accept_completion final : public accept_completion_base {
+        public:
+            accept_completion(pollable_fd_state& listenfd)
+                : accept_completion_base(listenfd) {}
+            void complete(size_t fd) noexcept final {
+                pollable_fd pfd(file_desc::from_fd(fd));
+                _result.set_value(std::move(pfd), std::move(_sa));
+                delete this;
+            }
+        };
+        auto desc = std::make_unique<accept_completion>(listenfd);
+        auto req = internal::io_request::make_accept(listenfd.fd.get(), desc->posix_sockaddr(), desc->socklen_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC);
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {

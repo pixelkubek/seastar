@@ -1997,35 +1997,7 @@ public:
 #endif
 
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
-        if (fd.take_speculation(POLLIN)) {
-            auto buffer = ba->allocate_buffer();
-            try {
-                auto r = fd.fd.recv(buffer.get_write(), buffer.size(), MSG_DONTWAIT);
-                if (r) {
-                    if (size_t(*r) == buffer.size()) {
-                        fd.speculate_epoll(EPOLLIN);
-                    }
-                    buffer.trim(*r);
-                    return make_ready_future<temporary_buffer<char>>(std::move(buffer));
-                }
-            } catch (...) {
-                return current_exception_as_future<temporary_buffer<char>>();
-            }
-        }
-        class recv_some_completion final : public read_completion_base {
-            pollable_fd_state& _fd;
-        public:
-            recv_some_completion(pollable_fd_state& fd, temporary_buffer<char> buffer)
-                : read_completion_base(std::move(buffer))
-                , _fd(fd) {}
-            void complete(size_t bytes) noexcept final {
-                if (bytes == _buffer.size()) {
-                    _fd.speculate_epoll(EPOLLIN);
-                }
-                read_completion_base::complete(bytes);
-            }
-        };
-        auto desc = std::make_unique<recv_some_completion>(fd, ba->allocate_buffer());
+        auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
         auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
         return submit_request(std::move(desc), std::move(req));
     }

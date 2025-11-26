@@ -2265,37 +2265,15 @@ public:
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
-        if (fd.take_speculation(EPOLLOUT)) {
-            ::msghdr mh = {};
-            mh.msg_iov = iovs.data();
-            mh.msg_iovlen = std::min<size_t>(iovs.size(), IOV_MAX);
-            try {
-                auto r = fd.fd.sendmsg(&mh, MSG_NOSIGNAL | MSG_DONTWAIT);
-                if (r) {
-                    if (size_t(*r) == len) {
-                        fd.speculate_epoll(EPOLLOUT);
-                    }
-                    return make_ready_future<size_t>(*r);
-                }
-            } catch (...) {
-                return current_exception_as_future<size_t>();
-            }
-        }
         class write_completion final : public io_completion {
-            pollable_fd_state& _fd;
             ::msghdr _mh = {};
-            const size_t _to_write;
             promise<size_t> _result;
         public:
-            write_completion(pollable_fd_state& fd, std::span<iovec> iovs, size_t len)
-                : _fd(fd), _to_write(len) {
+            write_completion(std::span<iovec> iovs) {
                 _mh.msg_iov = iovs.data();
                 _mh.msg_iovlen = std::min<size_t>(iovs.size(), IOV_MAX);
             }
             void complete(size_t bytes) noexcept final {
-                if (bytes == _to_write) {
-                    _fd.speculate_epoll(EPOLLOUT);
-                }
                 _result.set_value(bytes);
                 delete this;
             }
@@ -2310,10 +2288,11 @@ public:
                 return _result.get_future();
             }
         };
-        auto desc = std::make_unique<write_completion>(fd, iovs, len);
+        auto desc = std::make_unique<write_completion>(iovs);
         auto req = internal::io_request::make_sendmsg(fd.fd.get(), desc->msghdr(), MSG_NOSIGNAL);
         return submit_request(std::move(desc), std::move(req));
     }
+
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
         if (fd.take_speculation(EPOLLOUT)) {
             try {

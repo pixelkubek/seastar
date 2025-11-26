@@ -1978,7 +1978,10 @@ public:
     }
 
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
-        return make_ready_future<temporary_buffer<char>>();
+        auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
+        const uint64_t position_file_offset = -1;
+        auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, desc->get_write(), desc->get_size(), false);
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {

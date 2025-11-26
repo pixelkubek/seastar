@@ -1985,7 +1985,9 @@ public:
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
-        return make_ready_future<size_t>();
+        auto desc = std::make_unique<sendmsg_completion_base>(iovs, len);
+        auto req = internal::io_request::make_sendmsg(fd.fd.get(), desc->msghdr(), MSG_NOSIGNAL);
+        return submit_request(std::move(desc), std::move(req));
     }
 
 #if SEASTAR_API_LEVEL < 9

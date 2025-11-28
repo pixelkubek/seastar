@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <thread>
 #include <stack>
+#include <set>
 #include <boost/any.hpp>
 #include <boost/program_options.hpp>
 #include <boost/container/static_vector.hpp>
@@ -44,6 +45,10 @@
 namespace seastar {
 
 class reactor;
+
+namespace resource {
+    using cpuset = std::set<unsigned>;
+}
 
 // FIXME: merge it with storage context below. At this point the
 // main thing to do is unify the iocb list
@@ -346,6 +351,17 @@ public:
     std::unique_ptr<reactor_backend> create(reactor& r);
     static reactor_backend_selector default_backend();
     static std::vector<reactor_backend_selector> available();
+    
+    /// Returns the number of CPUs this backend wants to dedicate as async workers
+    /// Returns 0 for backends that don't need dedicated async workers
+    unsigned num_async_workers(const resource::cpuset& cpu_set) const;
+    
+    /// Assigns set of cpus for backends that need dedicated async workers.
+    /// Modifies cpu_set by removing allocated workers and returns the worker cpuset
+    /// Returns set of allocated CPUs for backends that need dedicated async workers
+    /// Throws if there aren't enough CPUs available
+    resource::cpuset allocate_async_workers(resource::cpuset& cpu_set) const;
+    
     friend std::ostream& operator<<(std::ostream& os, const reactor_backend_selector& rbs) {
         return os << rbs._name;
     }

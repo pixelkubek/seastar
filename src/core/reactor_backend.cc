@@ -1867,6 +1867,69 @@ public:
     }
 };
 
+/// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
+/// Handles CPU allocation, worker thread management, and backend creation
+namespace asymmetric_uring_factory {
+    /// Configuration for asymmetric io_uring backend
+    struct config {
+        unsigned cores_per_worker = 3; // How many app cores per worker thread
+        resource::cpuset worker_cpus; // CPUs allocated for async workers
+        resource::cpuset app_cpus; // CPUs for application (reactors)
+    };
+
+    /// Calculate how many worker threads are needed for the given CPU set
+    static unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+        if (cores_per_worker == 0) {
+            return 0;
+        }
+
+        return cpu_set.size() / (cores_per_worker + 1);
+    }
+    
+    /// Allocate CPUs for workers
+    /// Returns configuration with both worker and app CPUs
+    static config allocate_cpus(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+        config cfg;
+        cfg.cores_per_worker = cores_per_worker;
+        
+        unsigned num_workers = calculate_num_workers(cpu_set, cores_per_worker);
+        
+        if (num_workers == 0) {
+            seastar_logger.warn("Asymmetric io_uring: not enough CPUs for workers "
+                            "(need at least {} CPUs for 1 worker), using 0 workers",
+                            cores_per_worker + 1);
+            cfg.app_cpus = cpu_set;
+            return cfg;
+        }
+        
+        if (cpu_set.size() <= num_workers) {
+            throw std::runtime_error(
+                fmt::format("Asymmetric io_uring requires at least {} app core(s) + {} worker core(s), "
+                        "but only {} CPU(s) available",
+                        1, num_workers, cpu_set.size()));
+        }
+        
+        // Allocate last N cores for workers
+        std::copy(cpu_set.crbegin(),
+                std::next(cpu_set.crbegin(), num_workers),
+                std::inserter(cfg.worker_cpus, cfg.worker_cpus.end()));
+        
+        // Store app cores and remove workers from it
+        cfg.app_cpus = cpu_set;
+        for (auto cpu : cfg.worker_cpus) {
+            cfg.app_cpus.erase(cpu);
+        }
+        
+        seastar_logger.info("Asymmetric io_uring: {} app cores [{}], {} worker cores [{}]",
+                        cfg.app_cpus.size(), fmt::join(cfg.app_cpus, ","),
+                        cfg.worker_cpus.size(), fmt::join(cfg.worker_cpus, ","));
+        
+        return cfg;
+    }
+
+    static const unsigned CPUS_PER_IO_URING_WORKER = 3;
+} // namespace asymmetric_uring_factory
+
 class reactor_backend_asymmetric_uring final : public reactor_backend {
     // s_queue_len is more or less arbitrary. Too low and we'll be
     // issuing too small batches, too high and we require too much locked
@@ -2045,6 +2108,8 @@ public:
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         auto tfd = _r._task_quota_timer.get();
         ::fcntl(tfd, F_SETFL, ::fcntl(tfd, F_GETFL) | O_NONBLOCK);
+        const auto& worker_cpus = r._cfg.async_worker_cpus;
+        SEASTAR_ASSERT(!worker_cpus.empty());
     }
     ~reactor_backend_asymmetric_uring() {
         ::io_uring_queue_exit(&_uring);
@@ -2456,4 +2521,24 @@ std::vector<reactor_backend_selector> reactor_backend_selector::available() {
     return ret;
 }
 
+unsigned reactor_backend_selector::num_async_workers(const resource::cpuset& cpu_set) const {
+#ifdef SEASTAR_HAVE_URING
+    if (_name == "asymmetric_io_uring") {
+        return asymmetric_uring_factory::calculate_num_workers(cpu_set, asymmetric_uring_factory::CPUS_PER_IO_URING_WORKER);
+    }
+#endif
+    return 0;
 }
+
+std::pair<resource::cpuset, resource::cpuset> reactor_backend_selector::allocate_async_workers(const resource::cpuset& cpu_set) const {
+#ifdef SEASTAR_HAVE_URING
+    if (_name == "asymmetric_io_uring") {
+        auto cfg = asymmetric_uring_factory::allocate_cpus(cpu_set, asymmetric_uring_factory::CPUS_PER_IO_URING_WORKER);
+        return {cfg.worker_cpus, cfg.app_cpus};
+    }
+#endif
+    return {{}, cpu_set};  // Other backends don't need workers
+}
+
+}
+

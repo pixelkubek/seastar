@@ -1887,10 +1887,16 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
                 : pollable_fd_state(std::move(desc), std::move(speculate)) {
         }
         pollable_fd_state_completion* get_desc(int events) {
-            return nullptr;
+            if (events & POLLIN) {
+                return &_completion_pollin;
+            } else if (events & POLLOUT) {
+                return &_completion_pollout;
+            } else {
+                return &_completion_pollrdhup;
+            }
         }
         future<> get_completion_future(int events) {
-            return make_ready_future<>();
+            return get_desc(events)->get_future();
         }
     };
 

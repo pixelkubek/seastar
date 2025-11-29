@@ -1955,7 +1955,14 @@ private:
     }
 
     bool do_flush_submission_ring() {
-        return false;
+        if (_has_pending_submissions) {
+            _has_pending_submissions = false;
+            _did_work_while_getting_sqe = false;
+            io_uring_submit(&_uring);
+            return true;
+        } else {
+            return std::exchange(_did_work_while_getting_sqe, false);
+        }
     }
 
     ::io_uring_sqe* get_sqe() {

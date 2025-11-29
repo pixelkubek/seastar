@@ -2368,6 +2368,7 @@ public:
     }
 
     virtual void start_tick() override {
+        _preempt_io_context.start_tick();
     }
 
     virtual void stop_tick() override {

@@ -2055,7 +2055,11 @@ public:
     }
 
     virtual bool kernel_submit_work() override {
-        return false;
+        bool did_work = false;
+        did_work |= _preempt_io_context.service_preempting_io();
+        did_work |= queue_pending_file_io();
+        did_work |= ::io_uring_submit(&_uring);
+        return did_work;
     }
 
     virtual bool kernel_events_can_sleep() const override {

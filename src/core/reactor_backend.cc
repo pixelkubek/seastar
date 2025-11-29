@@ -1966,7 +1966,13 @@ private:
     }
 
     ::io_uring_sqe* get_sqe() {
-        return nullptr;
+        ::io_uring_sqe* sqe;
+        while (__builtin_expect((sqe = try_get_sqe()) == nullptr, false)) {
+            do_flush_submission_ring();
+            do_process_kernel_completions_step();
+            _did_work_while_getting_sqe = true;
+        }
+        return sqe;
     }
 
     future<> poll(pollable_fd_state& fd, int events) {

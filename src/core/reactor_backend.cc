@@ -1906,8 +1906,23 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
     public:
         explicit recurring_eventfd_or_timerfd_completion(file_desc& fd) : fd_kernel_completion(fd) {}
         virtual void complete_with(ssize_t res) override {
+            char garbage[8];
+            auto ret = _fd.read(garbage, 8);
+            // Note: for hrtimer_completion we can have spurious wakeups,
+            // since we wait for this using both _preempt_io_context and the
+            // ring. So don't assert that we read anything.
+            SEASTAR_ASSERT(!ret || *ret == 8);
+            _armed = false;
         }
         void maybe_rearm(reactor_backend_asymmetric_uring& be) {
+            if (_armed) {
+                return;
+            }
+            auto sqe = be.get_sqe();
+            ::io_uring_prep_poll_add(sqe, fd().get(), POLLIN);
+            ::io_uring_sqe_set_data(sqe, static_cast<kernel_completion*>(this));
+            _armed = true;
+            be._has_pending_submissions = true;
         }
     };
 

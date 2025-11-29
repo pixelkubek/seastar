@@ -2360,7 +2360,7 @@ public:
     }
 
     virtual bool do_blocking_io() const override {
-        return false;
+        return true;
     }
 
     virtual void signal_received(int signo, siginfo_t* siginfo, void* ignore) override {

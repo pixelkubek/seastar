@@ -1976,7 +1976,12 @@ private:
     }
 
     future<> poll(pollable_fd_state& fd, int events) {
-        return make_ready_future<>();
+        auto sqe = get_sqe();
+        ::io_uring_prep_poll_add(sqe, fd.fd.get(), events);
+        auto ufd = static_cast<uring_pollable_fd_state*>(&fd);
+        ::io_uring_sqe_set_data(sqe, static_cast<kernel_completion*>(ufd->get_desc(events)));
+        _has_pending_submissions = true;
+        return ufd->get_completion_future(events);
     }
 
     void submit_io_request(const internal::io_request& req, io_completion* completion) {

@@ -2376,6 +2376,7 @@ public:
     }
 
     virtual void arm_highres_timer(const ::itimerspec& its) override {
+        _hrtimer_timerfd.timerfd_settime(TFD_TIMER_ABSTIME, its);
     }
 
     virtual void reset_preemption_monitor() override {

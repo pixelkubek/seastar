@@ -2388,6 +2388,7 @@ public:
     }
 
     virtual void start_handling_signal() override {
+        // We don't have anything special wrt. signals
     }
 
     virtual pollable_fd_state_ptr make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override {

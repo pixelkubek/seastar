@@ -1935,6 +1935,8 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
                 : recurring_eventfd_or_timerfd_completion(timerfd), _r(r) {
         }
         virtual void complete_with(ssize_t res) override {
+            recurring_eventfd_or_timerfd_completion::complete_with(res);
+            _r.service_highres_timer();
         }
     };
 

@@ -2107,7 +2107,7 @@ public:
     }
 
     virtual future<> poll_rdhup(pollable_fd_state& fd) override {
-        return make_ready_future<>();
+        return poll(fd, POLLRDHUP);
     }
 
     virtual void forget(pollable_fd_state& fd) noexcept override {

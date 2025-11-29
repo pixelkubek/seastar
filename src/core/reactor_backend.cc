@@ -2099,7 +2099,7 @@ public:
     }
 
     virtual future<> writeable(pollable_fd_state& fd) override {
-        return make_ready_future<>();
+        return poll(fd, POLLOUT);
     }
 
     virtual future<> readable_or_writeable(pollable_fd_state& fd) override {

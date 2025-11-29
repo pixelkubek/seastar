@@ -2051,7 +2051,7 @@ public:
     }
 
     virtual bool reap_kernel_completions() override {
-        return false;
+        return do_process_kernel_completions();
     }
 
     virtual bool kernel_submit_work() override {

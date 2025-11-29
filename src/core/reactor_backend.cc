@@ -2095,7 +2095,7 @@ public:
     }
 
     virtual future<> readable(pollable_fd_state& fd) override {
-        return make_ready_future<>();
+        return poll(fd, POLLIN);
     }
 
     virtual future<> writeable(pollable_fd_state& fd) override {

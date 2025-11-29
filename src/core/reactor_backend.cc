@@ -1991,7 +1991,10 @@ private:
 
     // Returns true if any work was done
     bool queue_pending_file_io() {
-        return false;
+        return _r._io_sink.drain([&] (const internal::io_request& req, io_completion* completion) -> bool {
+            submit_io_request(req, completion);
+            return true;
+        });
     }
 
     // Process kernel completions already extracted from the ring.

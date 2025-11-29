@@ -2103,7 +2103,7 @@ public:
     }
 
     virtual future<> readable_or_writeable(pollable_fd_state& fd) override {
-        return make_ready_future<>();
+        return poll(fd, POLLIN | POLLOUT);
     }
 
     virtual future<> poll_rdhup(pollable_fd_state& fd) override {

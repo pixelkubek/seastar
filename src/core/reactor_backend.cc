@@ -2111,6 +2111,8 @@ public:
     }
 
     virtual void forget(pollable_fd_state& fd) noexcept override {
+        auto* pfd = static_cast<uring_pollable_fd_state*>(&fd);
+        delete pfd;
     }
 
     virtual future<std::tuple<pollable_fd, socket_address>> accept(pollable_fd_state& listenfd) override {

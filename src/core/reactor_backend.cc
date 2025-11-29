@@ -2380,6 +2380,7 @@ public:
     }
 
     virtual void reset_preemption_monitor() override {
+        _preempt_io_context.reset_preemption_monitor();
     }
 
     virtual void request_preemption() override {

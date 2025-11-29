@@ -2372,6 +2372,7 @@ public:
     }
 
     virtual void stop_tick() override {
+        _preempt_io_context.stop_tick();
     }
 
     virtual void arm_highres_timer(const ::itimerspec& its) override {

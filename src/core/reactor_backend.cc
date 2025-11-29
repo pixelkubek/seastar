@@ -2063,6 +2063,7 @@ public:
     }
 
     virtual bool kernel_events_can_sleep() const override {
+        // We never need to spin while I/O is in flight.
         return true;
     }
 

@@ -2384,6 +2384,7 @@ public:
     }
 
     virtual void request_preemption() override {
+        _preempt_io_context.request_preemption();
     }
 
     virtual void start_handling_signal() override {

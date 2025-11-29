@@ -2364,6 +2364,7 @@ public:
     }
 
     virtual void signal_received(int signo, siginfo_t* siginfo, void* ignore) override {
+        _r._signals.action(signo, siginfo, ignore);
     }
 
     virtual void start_tick() override {

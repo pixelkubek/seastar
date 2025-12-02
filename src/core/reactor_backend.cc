@@ -22,6 +22,8 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <seastar/core/future.hh>
+#include <seastar/core/temporary_buffer.hh>
 #include <thread>
 #include <utility>
 #include <fcntl.h>
@@ -1927,6 +1929,52 @@ public:
         auto desc = std::make_unique<recv_some_completion>(fd, ba->allocate_buffer());
         auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
         return submit_request(std::move(desc), std::move(req));
+    }
+};
+
+class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
+public:
+    explicit reactor_backend_asymmetric_uring(reactor& r)
+        : reactor_backend_uring_base(r, try_create_uring(uring::QUEUE_LEN, true).value()) {
+    }
+
+    ~reactor_backend_asymmetric_uring() override {
+        ::io_uring_queue_exit(&_uring);
+    }
+
+    virtual future<std::tuple<pollable_fd, socket_address>> accept(pollable_fd_state& listenfd) override {
+        return make_ready_future<std::tuple<pollable_fd, socket_address>>();
+    }
+
+    virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {
+        return make_ready_future<>();
+    }
+
+    virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {
+        return make_ready_future<size_t>();
+    }
+
+    virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {
+        return make_ready_future<size_t>();
+    }
+
+    virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        return make_ready_future<temporary_buffer<char>>();
+    }
+
+    virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
+        return make_ready_future<size_t>();
+    }
+
+#if SEASTAR_API_LEVEL < 9
+    virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
+        return make_ready_future<size_t>();
+    }
+#endif
+
+    virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        return make_ready_future<temporary_buffer<char>>();
+
     }
 };
 

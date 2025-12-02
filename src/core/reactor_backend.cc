@@ -1930,6 +1930,246 @@ public:
     }
 };
 
+class reactor_backend_asymmetric_uring final : public reactor_backend {
+public:
+    explicit reactor_backend_asymmetric_uring(reactor& r)
+        : reactor_backend_uring_base(r, try_create_uring(uring::QUEUE_LEN, true).value()) {
+    }
+
+    ~reactor_backend_asymmetric_uring() override {
+        ::io_uring_queue_exit(&_uring);
+    }
+
+    virtual future<std::tuple<pollable_fd, socket_address>> accept(pollable_fd_state& listenfd) override {
+        if (listenfd.take_speculation(POLLIN)) {
+            try {
+                listenfd.maybe_no_more_recv();
+                socket_address sa;
+                auto maybe_fd = listenfd.fd.try_accept(sa, SOCK_CLOEXEC);
+                if (maybe_fd) {
+                    listenfd.speculate_epoll(EPOLLIN);
+                    pollable_fd pfd(std::move(*maybe_fd), pollable_fd::speculation(EPOLLOUT));
+                    return make_ready_future<std::tuple<pollable_fd, socket_address>>(std::move(pfd), std::move(sa));
+                }
+            } catch (...) {
+                return current_exception_as_future<std::tuple<pollable_fd, socket_address>>();
+            }
+        }
+        class accept_completion final : public accept_completion_base {
+        public:
+            accept_completion(pollable_fd_state& listenfd)
+                : accept_completion_base(listenfd) {}
+            void complete(size_t fd) noexcept final {
+                _listenfd.speculate_epoll(EPOLLIN);
+                pollable_fd pfd(file_desc::from_fd(fd), pollable_fd::speculation(EPOLLOUT));
+                _result.set_value(std::move(pfd), std::move(_sa));
+                delete this;
+            }
+        };
+        return readable_or_writeable(listenfd).then([this, &listenfd] {
+            auto desc = std::make_unique<accept_completion>(listenfd);
+            auto req = internal::io_request::make_accept(listenfd.fd.get(), desc->posix_sockaddr(), desc->socklen_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC);
+            return submit_request(std::move(desc), std::move(req));
+        });
+    }
+
+    virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {
+        class connect_completion final : public connect_completion_base {
+            pollable_fd_state& _fd;
+        public:
+            connect_completion(pollable_fd_state& fd, const socket_address& sa)
+                : connect_completion_base(sa)
+                , _fd(fd) {}
+            void complete(size_t fd) noexcept final {
+                _fd.speculate_epoll(POLLOUT);
+                connect_completion_base::complete(fd);
+            }
+        };
+        auto desc = std::make_unique<connect_completion>(fd, sa);
+        auto req = internal::io_request::make_connect(fd.fd.get(), desc->posix_sockaddr(), desc->socklen());
+        return submit_request(std::move(desc), std::move(req));
+    }
+
+    virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {
+        return _r.do_read(fd, buffer, len);
+    }
+
+    virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {
+        if (fd.take_speculation(POLLIN)) {
+            ::msghdr mh = {};
+            mh.msg_iov = const_cast<iovec*>(iov.data());
+            mh.msg_iovlen = iov.size();
+            try {
+                auto r = fd.fd.recvmsg(&mh, MSG_DONTWAIT);
+                if (r) {
+                    if (size_t(*r) == internal::iovec_len(iov)) {
+                        fd.speculate_epoll(EPOLLIN);
+                    }
+                    return make_ready_future<size_t>(*r);
+                }
+            } catch (...) {
+                return current_exception_as_future<size_t>();
+            }
+        }
+        class recvmsg_completion final : public recvmsg_completion_base {
+            pollable_fd_state& _fd;
+        public:
+            recvmsg_completion(pollable_fd_state& fd, const std::vector<iovec>& iov)
+                : recvmsg_completion_base(iov)
+                , _fd(fd) {}
+            void complete(size_t bytes) noexcept final {
+                if (bytes == internal::iovec_len(_iov)) {
+                    _fd.speculate_epoll(EPOLLIN);
+                }
+                recvmsg_completion_base::complete(bytes);
+            }
+        };
+        auto desc = std::make_unique<recvmsg_completion>(fd, iov);
+        auto req = internal::io_request::make_recvmsg(fd.fd.get(), desc->msghdr(), 0);
+        return submit_request(std::move(desc), std::move(req));
+    }
+
+    virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        if (fd.take_speculation(POLLIN)) {
+            auto buffer = ba->allocate_buffer();
+            try {
+                auto r = fd.fd.read(buffer.get_write(), buffer.size());
+                if (r) {
+                    if (size_t(*r) == buffer.size()) {
+                        fd.speculate_epoll(EPOLLIN);
+                    }
+                    buffer.trim(*r);
+                    return make_ready_future<temporary_buffer<char>>(std::move(buffer));
+                }
+            } catch (...) {
+                return current_exception_as_future<temporary_buffer<char>>();
+            }
+        }
+    
+        return readable(fd).then([this, &fd, ba] {
+            class read_some_completion final : public read_completion_base {
+                pollable_fd_state& _fd;
+            public:
+                read_some_completion(pollable_fd_state& fd, temporary_buffer<char> buffer)
+                    : read_completion_base(std::move(buffer))
+                    , _fd(fd) {}
+                void complete(size_t bytes) noexcept final {
+                    if (bytes == _buffer.size()) {
+                        _fd.speculate_epoll(EPOLLIN);
+                    }
+                    read_completion_base::complete(bytes);
+                }
+            };
+            auto desc = std::make_unique<read_some_completion>(fd, ba->allocate_buffer());
+            auto req = internal::io_request::make_read(fd.fd.get(), -1, desc->get_write(), desc->get_size(), false);
+            return submit_request(std::move(desc), std::move(req));
+        });
+    }
+
+    virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
+        if (fd.take_speculation(EPOLLOUT)) {
+            ::msghdr mh = {};
+            mh.msg_iov = iovs.data();
+            mh.msg_iovlen = std::min<size_t>(iovs.size(), IOV_MAX);
+            try {
+                auto r = fd.fd.sendmsg(&mh, MSG_NOSIGNAL | MSG_DONTWAIT);
+                if (r) {
+                    if (size_t(*r) == len) {
+                        fd.speculate_epoll(EPOLLOUT);
+                    }
+                    return make_ready_future<size_t>(*r);
+                }
+            } catch (...) {
+                return current_exception_as_future<size_t>();
+            }
+        }
+        class sendmsg_completion final : public sendmsg_completion_base {
+            pollable_fd_state& _fd;
+        public:
+            sendmsg_completion(pollable_fd_state& fd, std::span<iovec> iovs, size_t len)
+                : sendmsg_completion_base(iovs, len)
+                , _fd(fd) {}
+            void complete(size_t bytes) noexcept final {
+                if (bytes == to_write()) {
+                    _fd.speculate_epoll(EPOLLOUT);
+                }
+                sendmsg_completion_base::complete(bytes);
+            }
+        };
+        auto desc = std::make_unique<sendmsg_completion>(fd, iovs, len);
+        auto req = internal::io_request::make_sendmsg(fd.fd.get(), desc->msghdr(), MSG_NOSIGNAL);
+        return submit_request(std::move(desc), std::move(req));
+    }
+
+#if SEASTAR_API_LEVEL < 9
+    virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
+        if (fd.take_speculation(EPOLLOUT)) {
+            try {
+                auto r = fd.fd.send(buffer, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+                if (r) {
+                    if (size_t(*r) == len) {
+                        fd.speculate_epoll(EPOLLOUT);
+                    }
+                    return make_ready_future<size_t>(*r);
+                }
+            } catch (...) {
+                return current_exception_as_future<size_t>();
+            }
+        }
+        class send_completion final : public send_completion_base {
+            pollable_fd_state& _fd;
+        public:
+            send_completion(pollable_fd_state& fd, size_t to_write)
+                : send_completion_base(to_write)
+                , _fd(fd) {}
+            void complete(size_t bytes) noexcept final {
+                if (bytes == to_write()) {
+                    _fd.speculate_epoll(EPOLLOUT);
+                }
+                send_completion_base::complete(bytes);
+            }
+        };
+        auto desc = std::make_unique<send_completion>(fd, len);
+        auto req = internal::io_request::make_send(fd.fd.get(), buffer, len, MSG_NOSIGNAL);
+        return submit_request(std::move(desc), std::move(req));
+    }
+#endif
+
+    virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        if (fd.take_speculation(POLLIN)) {
+            auto buffer = ba->allocate_buffer();
+            try {
+                auto r = fd.fd.recv(buffer.get_write(), buffer.size(), MSG_DONTWAIT);
+                if (r) {
+                    if (size_t(*r) == buffer.size()) {
+                        fd.speculate_epoll(EPOLLIN);
+                    }
+                    buffer.trim(*r);
+                    return make_ready_future<temporary_buffer<char>>(std::move(buffer));
+                }
+            } catch (...) {
+                return current_exception_as_future<temporary_buffer<char>>();
+            }
+        }
+        class recv_some_completion final : public read_completion_base {
+            pollable_fd_state& _fd;
+        public:
+            recv_some_completion(pollable_fd_state& fd, temporary_buffer<char> buffer)
+                : read_completion_base(std::move(buffer))
+                , _fd(fd) {}
+            void complete(size_t bytes) noexcept final {
+                if (bytes == _buffer.size()) {
+                    _fd.speculate_epoll(EPOLLIN);
+                }
+                read_completion_base::complete(bytes);
+            }
+        };
+        auto desc = std::make_unique<recv_some_completion>(fd, ba->allocate_buffer());
+        auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
+        return submit_request(std::move(desc), std::move(req));
+    }
+};
+
 #endif
 
 static bool detect_aio_poll() {

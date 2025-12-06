@@ -237,7 +237,7 @@ struct convert<job_config> {
         cfg.name = node["name"].as<std::string>();
         cfg.type = node["type"].as<std::string>();
         cfg.parallelism = node["parallelism"].as<unsigned>();
-        if (cfg.type == "rpc") {
+        if (cfg.type == "rpc" || cfg.type == "rpc_streaming") {
             cfg.verb = node["verb"].as<std::string>();
             cfg.payload = node["payload"].as<byte_size>().size;
             cfg.client = true;
@@ -352,6 +352,7 @@ enum class rpc_verb : int32_t {
     BYE = 1,
     ECHO = 2,
     WRITE = 3,
+    SINK = 4,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -488,6 +489,111 @@ public:
     }
 };
 
+class job_rpc_streaming : public job {
+    using accumulator_type = accumulator_set<double, stats<tag::extended_p_square_quantile(quadratic), tag::mean, tag::max>>;
+
+    job_config _cfg;
+    socket_address _caddr;
+    client_config _ccfg;
+    rpc_protocol& _rpc;
+    std::unique_ptr<rpc_protocol::client> _client;
+    std::chrono::steady_clock::time_point _stop;
+    uint64_t _total_messages = 0;
+    accumulator_type _latencies;
+    uint64_t _payload_size_bytes = 0;
+    std::chrono::steady_clock::time_point _start_time{};
+    std::chrono::duration<double> _total_duration{0.0};
+
+public:
+    job_rpc_streaming(job_config cfg, rpc_protocol& rpc, client_config ccfg, socket_address caddr)
+            : _cfg(cfg)
+            , _caddr(std::move(caddr))
+            , _ccfg(ccfg)
+            , _rpc(rpc)
+            , _stop(std::chrono::steady_clock::now() + _cfg.duration)
+            , _latencies(extended_p_square_probabilities = quantiles)
+    {
+        _payload_size_bytes = _cfg.payload;
+    }
+
+    virtual std::string name() const override { return _cfg.name; }
+
+    virtual future<> run() override {
+      return with_scheduling_group(_cfg.sg, [this] {
+        rpc::client_options co;
+        co.tcp_nodelay = _ccfg.nodelay;
+        co.isolation_cookie = _cfg.sg_name;
+        _client = std::make_unique<rpc_protocol::client>(_rpc, co, _caddr);
+        _start_time = std::chrono::steady_clock::now();
+
+        return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (auto dummy) {
+          auto f = make_ready_future<>();
+          if (_cfg.sleep_time) {
+              // Do initial small delay to de-synchronize fibers
+              f = seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * dummy));
+          }
+          return std::move(f).then([this, dummy] {
+            // Create a stream sink for sending payload data to the server
+            return _client->make_stream_sink<serializer, payload_t>().then([this, dummy] (rpc::sink<payload_t> sink) {
+              // Make RPC call to register the sink with the server (unidirectional - no response sink needed)
+              auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::SINK);
+              return rpc_call(*_client, sink).then([this, sink = std::move(sink), dummy] () mutable {
+                // Create payload inside do_with to manage its lifetime
+                payload_t payload;
+                payload.resize(_cfg.payload / sizeof(payload_t::value_type), 0);
+                
+                return do_with(std::move(sink), std::move(payload),
+                    [this] (rpc::sink<payload_t>& sink, payload_t& payload) {
+                    // Send data through the sink until stop time
+                    return do_until([this] {
+                        return std::chrono::steady_clock::now() > _stop;
+                    }, [this, &sink, &payload] {
+                        _total_messages++;
+                        auto now = std::chrono::steady_clock::now();
+                        return sink(payload).then([this, start = now] {
+                            std::chrono::microseconds lat = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+                            _latencies(lat.count());
+                        }).then([this] {
+                            if (_cfg.sleep_time) {
+                                return seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
+                            } else {
+                                return make_ready_future<>();
+                            }
+                        });
+                    }).then([&sink] {
+                        // Close the sink when done sending
+                        return sink.close();
+                    });
+                });
+              });
+            });
+          });
+        }).finally([this] {
+            _total_duration = std::chrono::steady_clock::now() - _start_time;
+            return _client->stop();
+        });
+      });
+    }
+
+    virtual void emit_result(YAML::Emitter& out) const override {
+        out << YAML::Key << "messages" << YAML::Value << _total_messages;
+
+        auto total_bytes = _total_messages * _payload_size_bytes;
+        double throughput_kBps = (total_bytes >> 10) / _total_duration.count();
+        double messages_per_sec = _total_messages / _total_duration.count();
+        out << YAML::Key << "throughput" << YAML::Value << throughput_kBps << YAML::Comment("kB/s");
+        out << YAML::Key << "messages per second" << YAML::Value << messages_per_sec;
+        out << YAML::Key << "latencies" << YAML::Comment("usec");
+        out << YAML::BeginMap;
+        out << YAML::Key << "average" << YAML::Value << (uint64_t)mean(_latencies);
+        for (auto& q: quantiles) {
+            out << YAML::Key << fmt::format("p{}", q) << YAML::Value << (uint64_t)quantile(_latencies, quantile_probability = q);
+        }
+        out << YAML::Key << "max" << YAML::Value << (uint64_t)max(_latencies);
+        out << YAML::EndMap;
+    }
+};
+
 class job_cpu : public job {
     job_config _cfg;
     std::chrono::steady_clock::time_point _stop;
@@ -563,6 +669,9 @@ class context {
         if (cfg.type == "rpc") {
             return std::make_unique<job_rpc>(cfg, *_rpc, _cfg.client, *caddr);
         }
+        if (cfg.type == "rpc_streaming") {
+            return std::make_unique<job_rpc_streaming>(cfg, *_rpc, _cfg.client, *caddr);
+        }
         if (cfg.type == "cpu") {
             return std::make_unique<job_cpu>(cfg);
         }
@@ -604,10 +713,35 @@ public:
         _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
             return make_ready_future<uint64_t>(val.size());
         });
+        _rpc->register_handler(rpc_verb::SINK, [] (rpc::source<payload_t> source) {
+            // Process incoming data asynchronously - just drain the source
+            uint64_t total_messages = 0;
+            uint64_t total_payload = 0;
+            (void)do_with(std::move(source), std::move(total_messages), std::move(total_payload), [] (rpc::source<payload_t>& src, uint64_t& total_messages, uint64_t& total_payload) {
+                return repeat([&src, &total_messages, &total_payload] {
+                    return src().then([&total_messages, &total_payload] (std::optional<std::tuple<payload_t>> data) {
+                        if (!data) {
+                            // EOS
+                            return stop_iteration::yes;
+                        }
+                        total_messages++;
+                        total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                        return stop_iteration::no;
+                    });
+                })
+                .finally([&total_messages, &total_payload] {
+                    fmt::print("Server received total {} messages on stream, total payload: {} bytes\n", total_messages, total_payload);
+                });
+            }).handle_exception([] (std::exception_ptr) {
+                // TODO: ???
+            });
+        });
+
 
         if (laddr) {
             rpc::server_options so;
             so.tcp_nodelay = _cfg.server.nodelay;
+            so.streaming_domain = rpc::streaming_domain_type(1);
             rpc::resource_limits limits;
             limits.isolate_connection = [this] (sstring cookie) { return isolate_connection(cookie); };
             _server = std::make_unique<rpc_protocol::server>(*_rpc, so, *laddr, limits);

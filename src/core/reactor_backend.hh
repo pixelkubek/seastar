@@ -41,6 +41,10 @@
 
 #endif
 
+#ifdef SEASTAR_HAVE_URING
+#include <liburing.h>
+#endif
+
 namespace seastar {
 
 class reactor;
@@ -363,6 +367,46 @@ public:
         return os << rbs._name;
     }
 };
+
+#ifdef SEASTAR_HAVE_URING
+
+/// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
+/// Handles CPU allocation, worker thread management, and backend creation
+namespace asymmetric_uring_factory {
+    /// Configuration for asymmetric io_uring backend
+    struct config {
+        unsigned cores_per_worker = 3; // How many app cores per worker thread
+        resource::cpuset worker_cpus; // CPUs allocated for async workers
+        resource::cpuset app_cpus; // CPUs for application (reactors)
+    };
+
+    /// Calculate how many worker threads are needed for the given CPU set
+    unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker);
+    
+    /// Allocate CPUs for workers, modifying the cpu_set to remove allocated workers
+    /// Returns configuration with both worker and app CPUs
+    config allocate_cpus(resource::cpuset& cpu_set, unsigned cores_per_worker);
+
+    unsigned
+    select_worker_cpu(unsigned id, const std::set<unsigned>& worker_cpus);
+
+    std::optional<::io_uring>
+    try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error);
+
+    std::optional<::io_uring>
+    try_create_asymmetric_uring(unsigned worker_cpu, bool throw_on_error);
+
+    bool is_master_shard(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept;
+
+    unsigned get_uring_group_id(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept;
+
+    static const unsigned CPUS_PER_IO_URING_WORKER = 3;
+    inline constexpr unsigned QUEUE_LEN = 200;
+    inline constexpr std::chrono::milliseconds POLLER_SLEEP_TIMEOUT(2000);
+
+} // namespace asymmetric_uring_factory
+
+#endif // SEASTAR_HAVE_URING
 
 }
 

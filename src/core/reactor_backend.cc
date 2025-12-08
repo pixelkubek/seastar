@@ -1872,15 +1872,8 @@ public:
 /// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
 /// Handles CPU allocation, worker thread management, and backend creation
 namespace asymmetric_uring_factory {
-    /// Configuration for asymmetric io_uring backend
-    struct config {
-        unsigned cores_per_worker = 3; // How many app cores per worker thread
-        resource::cpuset worker_cpus; // CPUs allocated for async workers
-        resource::cpuset app_cpus; // CPUs for application (reactors)
-    };
-
     /// Calculate how many worker threads are needed for the given CPU set
-    static unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker){
+    unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker){
         if (cores_per_worker == 0) {
             return 0;
         }
@@ -1890,7 +1883,7 @@ namespace asymmetric_uring_factory {
     
     /// Allocate CPUs for workers, modifying the cpu_set to remove allocated workers
     /// Returns configuration with both worker and app CPUs
-    static config allocate_cpus(resource::cpuset& cpu_set, unsigned cores_per_worker) {
+    config allocate_cpus(resource::cpuset& cpu_set, unsigned cores_per_worker) {
         config cfg;
         cfg.cores_per_worker = cores_per_worker;
         
@@ -1929,16 +1922,12 @@ namespace asymmetric_uring_factory {
         return cfg;
     }
 
-    static
     unsigned
     select_worker_cpu(const std::set<unsigned>& worker_cpus) {
         SEASTAR_ASSERT(!worker_cpus.empty());
         const size_t selected_cpu_rank = this_shard_id() % worker_cpus.size();
         return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
     }
-
-    static const unsigned CPUS_PER_IO_URING_WORKER = 3;
-    static constexpr std::chrono::milliseconds POLLER_SLEEP_TIMEOUT(2000);
 
 } // namespace asymmetric_uring_factory
 

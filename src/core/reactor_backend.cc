@@ -1872,15 +1872,8 @@ public:
 /// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
 /// Handles CPU allocation, worker thread management, and backend creation
 namespace asymmetric_uring_factory {
-    /// Configuration for asymmetric io_uring backend
-    struct config {
-        unsigned cores_per_worker = 3; // How many app cores per worker thread
-        resource::cpuset worker_cpus; // CPUs allocated for async workers
-        resource::cpuset app_cpus; // CPUs for application (reactors)
-    };
-
     /// Calculate how many worker threads are needed for the given CPU set
-    static unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+    unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
         if (cores_per_worker == 0) {
             return 0;
         }
@@ -1890,7 +1883,7 @@ namespace asymmetric_uring_factory {
     
     /// Allocate CPUs for workers
     /// Returns configuration with both worker and app CPUs
-    static config allocate_cpus(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+    config allocate_cpus(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
         config cfg;
         cfg.cores_per_worker = cores_per_worker;
         
@@ -1929,7 +1922,6 @@ namespace asymmetric_uring_factory {
         return cfg;
     }
 
-    static
     unsigned
     select_worker_cpu(const resource::cpuset& worker_cpus) {
         SEASTAR_ASSERT(!worker_cpus.empty());
@@ -1937,14 +1929,11 @@ namespace asymmetric_uring_factory {
         return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
     }
 
-    static const unsigned CPUS_PER_IO_URING_WORKER = 3;
-    static constexpr std::chrono::milliseconds POLLER_SLEEP_TIMEOUT(2000);
-
 } // namespace asymmetric_uring_factory
 
 static
 std::optional<::io_uring>
-try_create_asymmetric_uring(unsigned queue_len, unsigned worker_cpu, std::chrono::milliseconds sleep_timeout, bool throw_on_error) {
+try_create_base_asymmetric_uring(unsigned queue_len, unsigned worker_cpu, std::chrono::milliseconds sleep_timeout, bool throw_on_error) {
     auto required_features =
             IORING_FEAT_SUBMIT_STABLE
             | IORING_FEAT_NODROP;
@@ -2181,7 +2170,7 @@ private:
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)
             : _r(r)
-            , _uring(try_create_asymmetric_uring(s_queue_len, asymmetric_uring_factory::select_worker_cpu(r._cfg.async_worker_cpus), asymmetric_uring_factory::POLLER_SLEEP_TIMEOUT, true).value())
+            , _uring(try_create_base_asymmetric_uring(s_queue_len, asymmetric_uring_factory::select_worker_cpu(r._cfg.async_worker_cpus), asymmetric_uring_factory::POLLER_SLEEP_TIMEOUT, true).value())
             , _hrtimer_timerfd(make_timerfd())
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)

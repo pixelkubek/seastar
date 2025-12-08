@@ -25,6 +25,11 @@
 #include <seastar/util/memory_diagnostics.hh>
 #include <seastar/core/scheduling.hh>
 #include <set>
+#include <variant>
+
+#ifdef SEASTAR_HAVE_URING
+#include <liburing.h>
+#endif
 
 namespace seastar {
 
@@ -46,6 +51,10 @@ struct reactor_config {
     bool abort_on_too_long_task_queue = false;
     /// CPUs dedicated to async workers (for asymmetric backend)
     std::set<unsigned> async_worker_cpus;
+
+#ifdef SEASTAR_HAVE_URING
+    std::optional<std::variant<int, ::io_uring>> asymmetric_uring;
+#endif
 };
 /// \endcond
 

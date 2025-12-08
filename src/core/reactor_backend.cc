@@ -2005,7 +2005,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
     // s_queue_len is more or less arbitrary. Too low and we'll be
     // issuing too small batches, too high and we require too much locked
     // memory, but otherwise it doesn't matter.
-    static constexpr unsigned s_queue_len = 200;
+    static constexpr unsigned s_queue_len = asymmetric_uring_factory::QUEUE_LEN;
     reactor& _r;
     ::io_uring _uring;
     bool _did_work_while_getting_sqe = false;

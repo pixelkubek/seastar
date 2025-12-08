@@ -1924,9 +1924,9 @@ namespace asymmetric_uring_factory {
     }
 
     unsigned
-    select_worker_cpu(const std::set<unsigned>& worker_cpus) {
+    select_worker_cpu(unsigned id, const std::set<unsigned>& worker_cpus) {
         SEASTAR_ASSERT(!worker_cpus.empty());
-        const size_t selected_cpu_rank = this_shard_id() % worker_cpus.size();
+        const size_t selected_cpu_rank = get_uring_group_id(id, worker_cpus);
         return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
     }
 
@@ -2000,7 +2000,7 @@ namespace asymmetric_uring_factory {
         auto params = ::io_uring_params{};
         params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
         params.sq_thread_cpu = worker_cpu;
-        params.sq_thread_idle = asymmetric_uring_factory::POLLER_SLEEP_TIMEOUT.count();
+        params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
 
         auto maybe_uring = try_create_asymmetric_uring_impl(params, throw_on_error);
 
@@ -2035,6 +2035,15 @@ namespace asymmetric_uring_factory {
             return std::get<::io_uring>(variant);
         }
     }
+
+    bool is_master_shard(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept {
+        return shard_id < worker_cpus.size();
+    }
+
+    unsigned get_uring_group_id(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept {
+        return shard_id % worker_cpus.size();
+    }
+
 
 } // namespace asymmetric_uring_factory
 

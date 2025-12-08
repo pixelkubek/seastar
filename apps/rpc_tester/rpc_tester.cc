@@ -541,6 +541,8 @@ private:
                             return make_ready_future<>();
                         });
                     }).finally([&s] {
+                        return s.flush();
+                    }).finally([&s] {
                         return s.close();
                     });
                 });
@@ -574,6 +576,8 @@ private:
                                 return make_ready_future<>();
                             });
                         }).finally([&s] {
+                            return s.flush();
+                        }).finally([&s] {
                             return s.close();
                         });
 
@@ -584,7 +588,7 @@ private:
                                     // EOS from server
                                     return stop_iteration::yes;
                                 }
-                                auto total_payload = std::get<0>(*data);
+                                //auto total_payload = std::get<0>(*data);
                                 // Optionally for debug:
                                 // fmt::print("Client received total payload so far: {}\n", total_payload);
                                 return stop_iteration::no;
@@ -759,56 +763,50 @@ public:
         });
         _rpc->register_handler(rpc_verb::UNIDIRECTIONAL, [] (rpc::source<payload_t> source) {
             // Process incoming data asynchronously - just drain the source
-            uint64_t total_messages = 0;
-            uint64_t total_payload = 0;
-            (void)do_with(std::move(source), std::move(total_messages), std::move(total_payload), [] (rpc::source<payload_t>& src, uint64_t& total_messages, uint64_t& total_payload) {
-                return repeat([&src, &total_messages, &total_payload] {
-                    return src().then([&total_messages, &total_payload] (std::optional<std::tuple<payload_t>> data) {
-                        if (!data) {
-                            // EOS
-                            return stop_iteration::yes;
-                        }
-                        ++total_messages;
-                        total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                        return stop_iteration::no;
+            (void)do_with(uint64_t(0), uint64_t(0),
+                [source] (uint64_t& total_messages, uint64_t& total_payload) mutable {
+                    return repeat([source, &total_messages, &total_payload] () mutable {
+                        return source().then([&total_messages, &total_payload] (std::optional<std::tuple<payload_t>> data) {
+                            if (!data) {
+                                // EOS
+                                return stop_iteration::yes;
+                            }
+                            ++total_messages;
+                            total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                            return stop_iteration::no;
+                        });
+                    })
+                    .finally([&total_messages, &total_payload] {
+                        fmt::print("Server received total {} messages on stream, total payload: {} bytes\n", total_messages, total_payload);
                     });
-                })
-                .finally([&total_messages, &total_payload] {
-                    fmt::print("Server received total {} messages on stream, total payload: {} bytes\n", total_messages, total_payload);
+                }).handle_exception([] (std::exception_ptr ex) {
+                    fmt::print("Error processing incoming stream: {}\n", ex);
                 });
-            }).handle_exception([] (std::exception_ptr ex) {
-                fmt::print("Error processing incoming stream: {}\n", ex);
-            });
         });
         _rpc->register_handler(rpc_verb::BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
-            uint64_t total_messages = 0;
-            uint64_t total_payload = 0;
-
             // Create sink for server->client direction
             auto sink = source.make_sink<serializer, uint64_t>();
-
-            (void)do_with(std::move(source), std::move(sink),
-                          std::move(total_messages), std::move(total_payload),
-                [] (rpc::source<payload_t>& src,
-                    rpc::sink<uint64_t>& snk,
-                    uint64_t& total_messages,
-                    uint64_t& total_payload) {
-                    return repeat([&src, &snk, &total_messages, &total_payload] {
-                        return src().then([&snk, &total_messages, &total_payload]
-                                          (std::optional<std::tuple<payload_t>> data) {
+            
+            (void)do_with(uint64_t(0), uint64_t(0),
+                [sink, source] (uint64_t& total_messages, uint64_t& total_payload) mutable {
+                    return repeat([sink, source, &total_messages, &total_payload] () mutable {
+                        return source().then([sink, &total_messages, &total_payload]
+                                          (std::optional<std::tuple<payload_t>> data) mutable {
                             if (!data) {
                                 // EOS from client
-                                return snk.close().then([] {
-                                    return stop_iteration::yes;
-                                });
+                                return make_ready_future<stop_iteration>(stop_iteration::yes);
                             }
                             ++total_messages;
                             total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
                             // Send current total_payload back to client
-                            return snk(total_payload).then([] {
+                            return sink(total_payload).then([] {
                                 return stop_iteration::no;
                             });
                         });
+                    }).finally([sink] () mutable {
+                        return sink.flush();
+                    }).finally([sink] () mutable {
+                        return sink.close();
                     }).finally([&total_messages, &total_payload] {
                         fmt::print("Server (bidirectional) received total {} messages on stream, total payload: {} bytes\n",
                                    total_messages, total_payload);

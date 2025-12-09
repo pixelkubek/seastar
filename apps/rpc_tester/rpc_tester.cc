@@ -356,7 +356,7 @@ enum class rpc_verb : int32_t {
     BYE = 1,
     ECHO = 2,
     WRITE = 3,
-    SINK = 4,
+    STREAM_ONEWAY = 4,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -528,7 +528,7 @@ private:
             return _client->make_stream_sink<serializer, payload_t>();
         }).then([this, &payload] (rpc::sink<payload_t> sink) {
             // Register the sink with the server via RPC call
-            auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::SINK);
+            auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::STREAM_ONEWAY);
             return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] () mutable {
                 return stream_data(std::move(sink), payload);
             });

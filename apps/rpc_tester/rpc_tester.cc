@@ -357,6 +357,7 @@ enum class rpc_verb : int32_t {
     ECHO = 2,
     WRITE = 3,
     STREAM_ONEWAY = 4,
+    STREAM_BIDIRECTIONAL = 5,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -708,7 +709,7 @@ public:
         _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
             return make_ready_future<uint64_t>(val.size());
         });
-        _rpc->register_handler(rpc_verb::SINK, [] (rpc::source<payload_t> source) {
+        _rpc->register_handler(rpc_verb::STREAM_ONEWAY, [] (rpc::source<payload_t> source) {
             // Process incoming data asynchronously - just drain the source
             uint64_t total_messages = 0;
             uint64_t total_payload = 0;

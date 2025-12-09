@@ -238,16 +238,19 @@ struct convert<job_config> {
         cfg.type = node["type"].as<std::string>();
         cfg.parallelism = node["parallelism"].as<unsigned>();
         if (cfg.type == "rpc" || cfg.type == "rpc_streaming") {
-            cfg.verb = node["verb"].as<std::string>();
             cfg.payload = node["payload"].as<byte_size>().size;
             cfg.client = true;
             if (node["sleep_time"]) {
                 cfg.sleep_time = node["sleep_time"].as<duration_time>().time;
             }
 
-            if (cfg.type == "rpc" && node["timeout"]) {
-                cfg.timeout = node["timeout"].as<duration_time>().time;
+            if (cfg.type == "rpc"){
+                cfg.verb = node["verb"].as<std::string>();
+                if (node["timeout"]) {
+                    cfg.timeout = node["timeout"].as<duration_time>().time;
+                }
             }
+
         } else if (cfg.type == "cpu") {
             if (node["execution_time"]) {
                 cfg.exec_time = node["execution_time"].as<duration_time>().time;
@@ -353,8 +356,7 @@ enum class rpc_verb : int32_t {
     BYE = 1,
     ECHO = 2,
     WRITE = 3,
-    UNIDIRECTIONAL = 4,
-    BIDIRECTIONAL = 5,
+    SINK = 4,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -515,80 +517,39 @@ public:
     virtual std::string name() const override { return _cfg.name; }
 
 private:
-    // Unidirectional worker: client only sends payload_t, server only receives
-    future<> run_unidirectional_worker(unsigned worker_id, const payload_t& payload) {
+    future<> run_streaming_worker(unsigned worker_id, const payload_t& payload) {
         // Initial delay to de-synchronize fibers
-        auto initial_delay = _cfg.sleep_time
+        auto initial_delay = _cfg.sleep_time 
             ? seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id))
             : make_ready_future<>();
 
         return initial_delay.then([this, &payload] {
+            // Create a stream sink for sending payload data to the server
             return _client->make_stream_sink<serializer, payload_t>();
         }).then([this, &payload] (rpc::sink<payload_t> sink) {
-            auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::UNIDIRECTIONAL);
+            // Register the sink with the server via RPC call
+            auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::SINK);
             return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] () mutable {
-                return do_with(std::move(sink), [this, &payload] (rpc::sink<payload_t>& s) {
-                    return do_until([this] {
-                        return std::chrono::steady_clock::now() > _stop;
-                    }, [this, &s, &payload] {
-                        ++_total_messages;
-                        return s(payload).then([this] {
-                            if (_cfg.sleep_time) {
-                                return seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
-                            }
-                            return make_ready_future<>();
-                        });
-                    }).finally([&s] {
-                        return s.close();
-                    });
-                });
+                return stream_data(std::move(sink), payload);
             });
         });
     }
 
-    // Bidirectional worker: client sends payload_t and receives uint64_t totals from server
-    future<> run_bidirectional_worker(unsigned worker_id, const payload_t& payload) {
-        auto initial_delay = _cfg.sleep_time
-            ? seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id))
-            : make_ready_future<>();
-
-        return initial_delay.then([this, &payload] {
-            // Create stream sink for client->server direction
-            return _client->make_stream_sink<serializer, payload_t>();
-        }).then([this, &payload] (rpc::sink<payload_t> sink) {
-            auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(rpc_verb::BIDIRECTIONAL);
-            return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] (rpc::source<uint64_t> source) mutable {
-                return do_with(std::move(source), std::move(sink),
-                    [this, &payload] (rpc::source<uint64_t>& src, rpc::sink<payload_t>& s) {
-                        // Sender: push payloads until stop time, then close sink
-                        auto sender = do_until([this] {
-                            return std::chrono::steady_clock::now() > _stop;
-                        }, [this, &s, &payload] {
-                            ++_total_messages;
-                            return s(payload).then([this] {
-                                if (_cfg.sleep_time) {
-                                    return seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
-                                }
-                                return make_ready_future<>();
-                            });
-                        }).finally([&s] {
-                            return s.close();
-                        });
-
-                        // Receiver: drain partial totals from server until EOS
-                        auto receiver = repeat([&src] {
-                            return src().then([] (std::optional<std::tuple<uint64_t>> data) {
-                                if (!data) {
-                                    // EOS from server
-                                    return stop_iteration::yes;
-                                }
-                                
-                                return stop_iteration::no;
-                            });
-                        });
-
-                        return when_all(std::move(sender), std::move(receiver)).discard_result();
-                    });
+    future<> stream_data(rpc::sink<payload_t> sink, const payload_t& payload) {
+        return do_with(std::move(sink), [this, &payload] (rpc::sink<payload_t>& sink) {
+            // Send data through the sink until stop time
+            return do_until([this] {
+                return std::chrono::steady_clock::now() > _stop;
+            }, [this, &sink, &payload] {
+                ++_total_messages;
+                return sink(payload).then([this] {
+                    if (_cfg.sleep_time) {
+                        return seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
+                    }
+                    return make_ready_future<>();
+                });
+            }).finally([&sink] {
+                return sink.close();
             });
         });
     }
@@ -607,13 +568,7 @@ public:
 
         return do_with(std::move(payload), [this] (const payload_t& payload) {
             return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this, &payload] (unsigned worker_id) {
-                if (_cfg.verb == "unidirectional") {
-                    return run_unidirectional_worker(worker_id, payload);
-                } else if (_cfg.verb == "bidirectional") {
-                    return run_bidirectional_worker(worker_id, payload);
-                } else {
-                    throw std::runtime_error("unknown rpc_streaming verb: " + _cfg.verb);
-                }
+                return run_streaming_worker(worker_id, payload);
             });
         }).finally([this] {
             _total_duration = std::chrono::steady_clock::now() - _start_time;
@@ -625,7 +580,7 @@ public:
     virtual void emit_result(YAML::Emitter& out) const override {
         out << YAML::Key << "messages" << YAML::Value << _total_messages;
 
-        if (_cfg.verb == "unidirectional" || _cfg.verb == "bidirectional") {
+        if (_cfg.verb == "write" || _cfg.verb == "unidirectional" || _cfg.verb == "bidirectional") {
             auto total_bytes = _total_messages * _payload_size_bytes;
             double throughput_kBps = (total_bytes >> 10) / _total_duration.count();
             out << YAML::Key << "throughput" << YAML::Value << throughput_kBps << YAML::Comment("kB/s");
@@ -755,7 +710,7 @@ public:
         _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
             return make_ready_future<uint64_t>(val.size());
         });
-        _rpc->register_handler(rpc_verb::UNIDIRECTIONAL, [] (rpc::source<payload_t> source) {
+        _rpc->register_handler(rpc_verb::SINK, [] (rpc::source<payload_t> source) {
             // Process incoming data asynchronously - just drain the source
             uint64_t total_messages = 0;
             uint64_t total_payload = 0;
@@ -777,45 +732,6 @@ public:
             }).handle_exception([] (std::exception_ptr ex) {
                 fmt::print("Error processing incoming stream: {}\n", ex);
             });
-        });
-        _rpc->register_handler(rpc_verb::BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
-            uint64_t total_messages = 0;
-            uint64_t total_payload = 0;
-
-            // Create sink for server->client direction
-            auto sink = source.make_sink<serializer, uint64_t>();
-
-            (void)do_with(std::move(source), std::move(sink),
-                          std::move(total_messages), std::move(total_payload),
-                [] (rpc::source<payload_t>& src,
-                    rpc::sink<uint64_t>& snk,
-                    uint64_t& total_messages,
-                    uint64_t& total_payload) {
-                    return repeat([&src, &snk, &total_messages, &total_payload] {
-                        return src().then([&snk, &total_messages, &total_payload]
-                                          (std::optional<std::tuple<payload_t>> data) {
-                            if (!data) {
-                                // EOS from client
-                                return snk.close().then([] {
-                                    return stop_iteration::yes;
-                                });
-                            }
-                            ++total_messages;
-                            total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                            // Send current total_payload back to client
-                            return snk(total_payload).then([] {
-                                return stop_iteration::no;
-                            });
-                        });
-                    }).finally([&total_messages, &total_payload] {
-                        fmt::print("Server (bidirectional) received total {} messages on stream, total payload: {} bytes\n",
-                                   total_messages, total_payload);
-                    });
-                }).handle_exception([] (std::exception_ptr ex) {
-                    fmt::print("Error processing bidirectional stream: {}\n", ex);
-                });
-
-            return sink;
         });
 
 

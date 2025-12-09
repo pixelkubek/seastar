@@ -785,49 +785,43 @@ public:
         });
 
         _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
+            uint64_t total_messages = 0;
+            uint64_t total_payload = 0;
+
             // Create sink for server->client direction
-            auto sink = source.make_sink<serializer, payload_t>();
-            
-            // Process stream asynchronously - sink will be kept alive by the async operation
-            (void)seastar::async([sink, source] () mutable {
-                uint64_t total_messages = 0;
-                uint64_t total_payload = 0;
-                
-                try {
-                    while (true) {
-                        auto data = source().get();
-                        if (!data) {
-                            // EOS from client
-                            break;
-                        }
-                        ++total_messages;
-                        total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                        // Send current total_payload back to client
-                        sink(std::get<0>(*data)).get();
-                    }
-                } catch (...) {
-                    fmt::print("Error processing bidirectional stream: {}\n", std::current_exception());
-                }
-                
-                try {
-                    sink.flush().get();
-                } catch (...) {
-                    // Ignore flush errors
-                }
-                
-                try {
-                    sink.close().get();
-                } catch (...) {
-                    // Ignore close errors
-                }
-                
-                fmt::print("Server (bidirectional) received total {} messages on stream, total payload: {} bytes\n",
-                           total_messages, total_payload);
-            });
+            auto sink = source.make_sink<serializer, uint64_t>();
+
+            (void)do_with(std::move(source),
+                          std::move(total_messages), std::move(total_payload),
+                [sink] (rpc::source<payload_t>& src,
+                    uint64_t& total_messages,
+                    uint64_t& total_payload) mutable {
+                    return repeat([&src, &sink, &total_messages, &total_payload] {
+                        return src().then([&sink, &total_messages, &total_payload]
+                                          (std::optional<std::tuple<payload_t>> data) {
+                            if (!data) {
+                                return make_ready_future<stop_iteration>(stop_iteration::yes);
+                            }
+                            ++total_messages;
+                            total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                            // Send current total_payload back to client
+                            return sink(total_payload).then([] {
+                                return stop_iteration::no;
+                            });
+                        });
+                    }).finally([&sink] {
+                        return sink.close();
+                    })
+                    .finally([&total_messages, &total_payload] {
+                        fmt::print("Server (bidirectional) received total {} messages on stream, total payload: {} bytes\n",
+                                   total_messages, total_payload);
+                    });
+                }).handle_exception([] (std::exception_ptr ex) {
+                    fmt::print("Error processing bidirectional stream: {}\n", ex);
+                });
 
             return sink;
         });
-
 
 
         if (laddr) {

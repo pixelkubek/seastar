@@ -625,7 +625,7 @@ public:
     virtual void emit_result(YAML::Emitter& out) const override {
         out << YAML::Key << "messages" << YAML::Value << _total_messages;
 
-        if (_cfg.verb == "write" || _cfg.verb == "unidirectional" || _cfg.verb == "bidirectional") {
+        if (_cfg.verb == "unidirectional" || _cfg.verb == "bidirectional") {
             auto total_bytes = _total_messages * _payload_size_bytes;
             double throughput_kBps = (total_bytes >> 10) / _total_duration.count();
             out << YAML::Key << "throughput" << YAML::Value << throughput_kBps << YAML::Comment("kB/s");
@@ -633,7 +633,6 @@ public:
         
         double messages_per_sec = _total_messages / _total_duration.count();
         out << YAML::Key << "messages per second" << YAML::Value << messages_per_sec;
-        out << YAML::EndMap;
     }
 };
 

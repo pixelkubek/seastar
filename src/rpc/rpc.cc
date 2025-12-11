@@ -1401,6 +1401,7 @@ void server::accept() {
 }
 
 future<> server::shutdown() {
+    fmt::print("Server shutting down\n");
     if (_shutdown) {
         return make_ready_future<>();
     }
@@ -1420,6 +1421,7 @@ future<> server::shutdown() {
 }
 
 future<> server::stop() {
+    fmt::print("Server stopping\n");
     return when_all(
         shutdown(),
         _reply_gate.close()

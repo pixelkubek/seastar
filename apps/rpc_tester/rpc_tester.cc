@@ -725,6 +725,7 @@ class context {
     std::vector<std::unique_ptr<job>> _jobs;
     std::unordered_map<std::string, scheduling_group> _sched_groups;
     std::shared_ptr<seastar::logger> _rpc_logger;
+    gate _stream_gate;
 
     std::unique_ptr<job> make_job(job_config cfg, std::optional<socket_address> caddr) {
         if (cfg.type == "rpc") {
@@ -781,11 +782,11 @@ public:
         _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
             return make_ready_future<uint64_t>(val.size());
         });
-        _rpc->register_handler(rpc_verb::STREAM_ONEWAY, [] (rpc::source<payload_t> source) {
+        _rpc->register_handler(rpc_verb::STREAM_ONEWAY, [this] (rpc::source<payload_t> source) {
             // Process incoming data asynchronously - just drain the source
-            uint64_t total_messages = 0;
-            uint64_t total_payload = 0;
-            (void)do_with(std::move(source), std::move(total_messages), std::move(total_payload), [] (rpc::source<payload_t>& src, uint64_t& total_messages, uint64_t& total_payload) {
+            return with_gate(_stream_gate, do_with(std::move(source), [] (rpc::source<payload_t>& src) {
+                uint64_t total_messages = 0;
+                uint64_t total_payload = 0;
                 return repeat([&src, &total_messages, &total_payload] {
                     return src().then([&total_messages, &total_payload] (std::optional<std::tuple<payload_t>> data) {
                         if (!data) {
@@ -799,24 +800,23 @@ public:
                         return stop_iteration::no;
                     });
                 })
-                .finally([&total_messages, &total_payload] {
+                .then([&total_messages, &total_payload] {
                     fmt::print("Server received total {} messages on stream, total payload: {} bytes\n", total_messages, total_payload);
                 });
             }).handle_exception([] (std::exception_ptr ex) {
                 fmt::print("Error processing incoming oneway stream: {}\n", ex);
-            });
+            }));
         });
 
-        _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
+        _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [this] (rpc::source<payload_t> source) {
             // Create sink for server->client direction
             auto sink = source.make_sink<serializer, uint64_t>();
 
-            (void)job_rpc_streaming::process_bi_source(std::move(source), sink)
-            .handle_exception([] (std::exception_ptr ex) {
+            return with_gate(_stream_gate, job_rpc_streaming::process_bi_source(std::move(source), sink).then([sink = std::move(sink)] () mutable {
+                return std::move(sink);
+            })).handle_exception([] (std::exception_ptr ex) {
                 fmt::print("Error processing incoming bidirectional stream: {}\n", ex);
             });
-
-            return sink;
         });
 
 
@@ -857,6 +857,7 @@ public:
     }
 
     future<> stop() {
+        fmt::print("Stopping context on shard {}\n", this_shard_id());
         if (_client) {
             return _rpc->make_client<void()>(rpc_verb::BYE)(*_client).finally([this] {
                 return _client->stop();
@@ -864,7 +865,7 @@ public:
         }
 
         if (_server) {
-            return _server->stop();
+            return _stream_gate.close().then([this] { return _server->stop(); });
         }
 
         return make_ready_future<>();

@@ -354,6 +354,7 @@ private:
         return _sink_closed;
     }
     future<> close_source() {
+        fmt::print("CODE Stream close source\n");
         _source_closed = true;
         if (stream_check_twoway_closed()) {
             return stream_close();

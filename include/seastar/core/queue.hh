@@ -126,6 +126,13 @@ public:
     /// Destroy any items in the queue, and pass the provided exception to any
     /// waiting readers or writers - or to any later read or write attempts.
     void abort(std::exception_ptr ex) noexcept {
+        try {
+            std::rethrow_exception(ex);
+        } catch (const std::exception& e) {
+            fmt::print("queue::abort called with exception: {}\n", e.what());
+        } catch (...) {
+            fmt::print("queue::abort called with unknown exception\n");
+        }
         // std::queue::empty() and pop() doesn't throw
         // since it just calls seastar::circular_buffer::pop_front
         // that is specified as noexcept.
@@ -223,9 +230,11 @@ requires std::is_nothrow_move_constructible_v<T>
 inline
 future<T> queue<T>::pop_eventually() noexcept {
     if (_ex) {
+        fmt::print("queue::pop_eventually exception\n");
         return make_exception_future<T>(_ex);
     }
     if (empty()) {
+        fmt::print("queue::pop_eventually waiting for not_empty\n");
         return not_empty().then([this] {
             if (_ex) {
                 return make_exception_future<T>(_ex);
@@ -300,7 +309,9 @@ template <typename T>
 requires std::is_nothrow_move_constructible_v<T>
 inline
 future<> queue<T>::not_empty() noexcept {
+    //fmt::print("queue::not_empty called\n");
     if (_ex) {
+        fmt::print("queue::not_empty exception");
         return make_exception_future<>(_ex);
     }
     if (!empty()) {

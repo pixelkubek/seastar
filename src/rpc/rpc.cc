@@ -136,6 +136,7 @@ static void log_exception(connection& c, log_level level, const char* log, std::
         s = "unknown exception";
     }
     auto formatted = format("{}: {}", log, s);
+    fmt::print("{}\n", formatted);
     c.get_logger()(c.peer_address(), level, std::string_view(formatted.data(), formatted.size()));
 }
 
@@ -455,6 +456,10 @@ connection::read_frame(socket_address info, input_stream<char>& in) {
         if (header.size() != header_size) {
             if (header.size() != 0) {
                 _logger(info, format("unexpected eof on a {} while reading header: expected {:d} got {:d}", FrameType::role(), header_size, header.size()));
+                fmt::print("read_frame: unexpected eof on {} while reading header: expected {} got {}\n", FrameType::role(), header_size, header.size());
+            } else {
+                fmt::print("read_frame: eof on {} while reading header, connection_id={}, peer={}, error={}, in.eof()={}\n", FrameType::role(), get_connection_id(), info, _error, in.eof());
+                _logger(info, format("eof on {} while reading header, connection_id={}, error={}", FrameType::role(), get_connection_id(), _error));
             }
             return make_ready_future<typename FrameType::return_type>(FrameType::empty_value());
         }
@@ -465,6 +470,7 @@ connection::read_frame(socket_address info, input_stream<char>& in) {
             return read_rcv_buf(in, size).then([this, info, h = std::move(h), size] (rcv_buf rb) {
                 if (rb.size != size) {
                     _logger(info, format("unexpected eof on a {} while reading data: expected {:d} got {:d}", FrameType::role(), size, rb.size));
+                    fmt::print("read_frame: unexpected eof on {} while reading data: expected {} got {}\n", FrameType::role(), size, rb.size);
                     return make_ready_future<typename FrameType::return_type>(FrameType::empty_value());
                 } else {
                     return make_ready_future<typename FrameType::return_type>(FrameType::make_value(h, std::move(rb)));
@@ -482,6 +488,9 @@ connection::read_frame_compressed(socket_address info, std::unique_ptr<compresso
             if (compress_header.size() != 4) {
                 if (compress_header.size() != 0) {
                     _logger(info, format("unexpected eof on a {} while reading compression header: expected 4 got {:d}", FrameType::role(), compress_header.size()));
+                    fmt::print("read_frame_compressed: unexpected eof on {} while reading compression header: expected 4 got {}\n", FrameType::role(), compress_header.size());
+                } else {
+                    fmt::print("read_frame_compressed: eof on {} while reading compression header\n", FrameType::role());
                 }
                 return make_ready_future<typename FrameType::return_type>(FrameType::empty_value());
             }
@@ -490,6 +499,7 @@ connection::read_frame_compressed(socket_address info, std::unique_ptr<compresso
             return read_rcv_buf(in, size).then([this, size, &compressor, info, &in] (rcv_buf compressed_data) {
                 if (compressed_data.size != size) {
                     _logger(info, format("unexpected eof on a {} while reading compressed data: expected {:d} got {:d}", FrameType::role(), size, compressed_data.size));
+                    fmt::print("read_frame_compressed: unexpected eof on {} while reading compressed data: expected {} got {}\n", FrameType::role(), size, compressed_data.size);
                     return make_ready_future<typename FrameType::return_type>(FrameType::empty_value());
                 }
                 auto eb = compressor->decompress(std::move(compressed_data));
@@ -586,6 +596,7 @@ future<> connection::stream_receive(circular_buffer<foreign_ptr<std::unique_ptr<
         });
         if (eof && !bufs.empty()) {
             SEASTAR_ASSERT(_stream_queue.empty());
+            fmt::print("stream_receive: EOF reached after receiving {} buffers\n", bufs.size());
             _stream_queue.push(rcv_buf(-1U)); // push eof marker back for next read to notice it
         }
     });
@@ -994,6 +1005,7 @@ future<> client::loop(client_options ops, const socket_address& addr, const sock
             auto&& [msg_id, ht, data] = co_await read_response_frame_compressed(_connected->read_buf);
             auto it = _outstanding.find(std::abs(msg_id));
             if (!data) {
+                fmt::print("Client setting _error due to !data\n");
                 _error = true;
             } else if (it != _outstanding.end()) {
                 auto handler = std::move(it->second);
@@ -1037,6 +1049,17 @@ future<> client::loop(client_options ops, const socket_address& addr, const sock
         }
     }
     if (is_stream() && (ep || _error)) {
+        if (ep) {
+            try {
+                std::rethrow_exception(ep);
+            } catch (const std::exception& e) {
+                fmt::print("Client stream aborting queue due to exception: {}\n", e.what());
+            } catch (...) {
+                fmt::print("Client stream aborting queue due to unknown exception\n");
+            }
+        } else {
+            fmt::print("Client stream aborting queue due to _error set\n");
+        }
         _stream_queue.abort(std::make_exception_ptr(stream_closed()));
     }
     _error = true;
@@ -1228,6 +1251,7 @@ future<> server::connection::process() {
             }
             auto [expire, type, msg_id, data] = co_await read_request_frame_compressed(_connected->read_buf);
             if (!data) {
+                fmt::print("Server setting _error due to !data\n");
                 _error = true;
                 continue;
             } else {
@@ -1260,6 +1284,17 @@ future<> server::connection::process() {
     }
     _connected->fd.shutdown_input();
     if (is_stream() && (ep || _error)) {
+        if (ep) {
+            try {
+                std::rethrow_exception(ep);
+            } catch (const std::exception& e) {
+                fmt::print("Server stream aborting queue due to exception: {}\n", e.what());
+            } catch (...) {
+                fmt::print("Server stream aborting queue due to unknown exception\n");
+            }
+        } else {
+            fmt::print("Server stream aborting queue due to _error set\n");
+        }
         _stream_queue.abort(std::make_exception_ptr(stream_closed()));
     }
     _error = true;

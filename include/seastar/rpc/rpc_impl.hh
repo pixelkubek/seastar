@@ -934,8 +934,13 @@ rcv_buf make_shard_local_buffer_copy(foreign_ptr<std::unique_ptr<rcv_buf>> org);
 template<typename Serializer, typename... In>
 future<std::optional<std::tuple<In...>>> source_impl<Serializer, In...>::operator()() {
     auto process_one_buffer = [this] {
+        //fmt::print("CODE Stream processing one buffer\n");
         foreign_ptr<std::unique_ptr<rcv_buf>> buf = std::move(this->_bufs.front());
         this->_bufs.pop_front();
+        if (buf->size == -1U) {
+            fmt::print("CODE Stream processing eos buffer\n");
+            return make_ready_future<std::optional<std::tuple<In...>>>(std::nullopt);
+        }
         return std::apply([] (In&&... args) {
             auto ret = std::make_optional(std::make_tuple(std::move(args)...));
             return make_ready_future<std::optional<std::tuple<In...>>>(std::move(ret));
@@ -950,16 +955,20 @@ future<std::optional<std::tuple<In...>>> source_impl<Serializer, In...>::operato
     return smp::submit_to(this->_con->get_owner_shard(), [this] () -> future<> {
         connection* con = this->_con->get();
         if (con->_source_closed) {
+            fmt::print("CODE Stream source closed\n");
             return make_exception_future<>(stream_closed());
         }
         return con->stream_receive(this->_bufs).then_wrapped([this, con] (future<>&& f) {
             if (f.failed()) {
-                return con->close_source().then_wrapped([ex = f.get_exception()] (future<> f){
+                auto ex = f.get_exception();
+                fmt::print("CODE Stream receive failed: {}\n", ex);
+                return con->close_source().then_wrapped([ex] (future<> f){
                     f.ignore_ready_future();
                     return make_exception_future<>(ex);
                 });
             }
             if (this->_bufs.empty()) { // nothing to read -> eof
+                fmt::print("CODE Stream receive eof\n");
                 return con->close_source().then_wrapped([] (future<> f) {
                     f.ignore_ready_future();
                     return make_ready_future<>();

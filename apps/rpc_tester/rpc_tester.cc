@@ -44,6 +44,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/rpc/rpc.hh>
 #include <seastar/util/assert.hh>
+#include <seastar/util/log.hh>
 
 using namespace seastar;
 using namespace boost::accumulators;
@@ -491,6 +492,7 @@ class job_rpc_streaming : public job {
     uint64_t _payload_size_bytes = 0;
     std::chrono::steady_clock::time_point _start_time{};
     std::chrono::duration<double> _total_duration{0.0};
+    int open_streams = 0;
 
 public:
     job_rpc_streaming(job_config cfg, rpc_protocol& rpc, client_config ccfg, socket_address caddr)
@@ -505,10 +507,13 @@ public:
 
 private:
     future<> run_streaming_worker(unsigned worker_id, const payload_t& payload) {
-        return _client->make_stream_sink<serializer, payload_t>().then([this, &payload] (rpc::sink<payload_t> sink) {
+        fmt::print("{}.{} starting streaming worker\n", this_shard_id(), worker_id);
+        return _client->make_stream_sink<serializer, payload_t>().then([this, &payload, worker_id] (rpc::sink<payload_t> sink) {
             // Register the sink with the server via RPC call
             auto rpc_call = _rpc.make_client<void(rpc::sink<payload_t>)>(rpc_verb::STREAM_ONEWAY);
-            return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] () mutable {
+            return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload, worker_id] () mutable {
+                ++open_streams;
+                fmt::print("{}.{} registered sink, starting to stream data\n", this_shard_id(), worker_id);
                 return stream_data(std::move(sink), payload);
             });
         })
@@ -521,6 +526,7 @@ private:
         return do_with(std::move(sink), [this, &payload] (rpc::sink<payload_t>& sink) {
             // Send data through the sink until stop time
             return do_until([this] {
+                //fmt::print("Checking stop condition at {}\n", std::chrono::steady_clock::now().time_since_epoch().count());
                 return std::chrono::steady_clock::now() > _stop;
             }, [this, &sink, &payload] {
                 ++_total_messages;
@@ -531,9 +537,14 @@ private:
                     return make_ready_future<>();
                 });
             }).finally([&sink] {
+                fmt::print("Closing sink after sending all data\n");
                 return sink.flush();
-            }).finally([&sink] {
-                return sink.close();
+            }).finally([&sink, this] {
+                fmt::print("Closing sink\n");
+                return sink.close().then([this] {
+                    fmt::print("Sink closed\n");
+                    --open_streams;
+                });
             });
         });
     }
@@ -543,6 +554,7 @@ private:
         return client.make_stream_sink<serializer, payload_t>().then([this, &payload, &client] (rpc::sink<payload_t> sink) {
             auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(rpc_verb::STREAM_BIDIRECTIONAL);
             return rpc_call(client, sink).then([this, sink = std::move(sink), &payload] (rpc::source<uint64_t> source) mutable {
+                ++open_streams;
                 auto sender = stream_data(std::move(sink), payload);
                 // Receiver: drain partial totals from server until EOS
                 auto receiver = repeat([src = std::move(source)] () mutable {
@@ -579,7 +591,7 @@ public:
                 auto initial_delay = _cfg.sleep_time
                     ? seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id))
                     : make_ready_future<>();
-                
+
                 return initial_delay.then([this, worker_id, &payload] {
                     if (_cfg.verb == "bidirectional") {
                         return run_bidirectional_worker(worker_id, payload, *_client);
@@ -587,6 +599,12 @@ public:
                     // TODO: check for explicit "unidirectional" verb?
                     return run_streaming_worker(worker_id, payload);
                 });
+            }).finally([this] {
+                fmt::print("All streaming workers finished\n");
+                fmt::print("Open streams remaining: {}\n", open_streams);
+                // flush output
+                fflush(stdout);
+                SEASTAR_ASSERT(open_streams == 0);
             });
         }).finally([this] {
             _total_duration = std::chrono::steady_clock::now() - _start_time;
@@ -706,6 +724,7 @@ class context {
     config _cfg;
     std::vector<std::unique_ptr<job>> _jobs;
     std::unordered_map<std::string, scheduling_group> _sched_groups;
+    std::shared_ptr<seastar::logger> _rpc_logger;
 
     std::unique_ptr<job> make_job(job_config cfg, std::optional<socket_address> caddr) {
         if (cfg.type == "rpc") {
@@ -741,6 +760,13 @@ public:
             , _cfg(cfg)
             , _sched_groups(std::move(groups))
     {
+        _rpc_logger = std::make_shared<seastar::logger>("rpc" + std::to_string(this_shard_id()));
+        _rpc_logger->set_level(seastar::log_level::trace);
+        seastar::logger::set_ostream(std::cout);
+        seastar::logger::set_ostream_enabled(true);
+        _rpc->set_logger(_rpc_logger.get());
+        seastar::global_logger_registry().set_logger_level("rpc" + std::to_string(this_shard_id()), seastar::log_level::trace);
+        _rpc_logger->info("RPC logger initialized, level: {}", static_cast<int>(_rpc_logger->level()));
         _rpc->register_handler(rpc_verb::HELLO, [this] {
             fmt::print("Got HELLO message from client\n");
             run_jobs().discard_result().forward_to(std::move(_server_jobs));
@@ -764,6 +790,8 @@ public:
                     return src().then([&total_messages, &total_payload] (std::optional<std::tuple<payload_t>> data) {
                         if (!data) {
                             // EOS
+                            printf("Server received end of stream correctly\n");
+                            fflush(stdout);
                             return stop_iteration::yes;
                         }
                         ++total_messages;
@@ -775,7 +803,7 @@ public:
                     fmt::print("Server received total {} messages on stream, total payload: {} bytes\n", total_messages, total_payload);
                 });
             }).handle_exception([] (std::exception_ptr ex) {
-                fmt::print("Error processing incoming stream: {}\n", ex);
+                fmt::print("Error processing incoming oneway stream: {}\n", ex);
             });
         });
 

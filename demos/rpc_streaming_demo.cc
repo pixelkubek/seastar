@@ -135,8 +135,9 @@ int main(int ac, char** av) {
     app.add_options()
         ("server", "run as server")
         ("client", "run as client")
+        ("flush", "flush stream before closing")
         ("port", boost::program_options::value<int>()->default_value(12345), "port")
-        ("addr", boost::program_options::value<std::string>()->default_value("127.0.0.1"), "address");
+        ("addr", boost::program_options::value<std::string>()->default_value("127.0.0.2"), "address");
 
     return app.run(ac, av, [&] {
         return seastar::async([&] {
@@ -145,6 +146,12 @@ int main(int ac, char** av) {
             bool is_client = opts.count("client");
             if (is_server == is_client) {
                 std::cout << "Specify either --server or --client" << std::endl;
+                return 0;
+            }
+
+            bool should_flush = opts.count("flush");
+            if (!is_client && should_flush) {
+                std::cout << "--flush option is only valid with --client" << std::endl;
                 return 0;
             }
 
@@ -188,18 +195,24 @@ int main(int ac, char** av) {
 
                 log.info("RPC call made, sending data");
                 payload_t payload;
-                payload.resize(10);
+                payload.resize(64000 / sizeof(payload_t::value_type), 0);
                 std::iota(payload.begin(), payload.end(), 5);
 
                 for (int i = 0; i < 10; ++i) {
                     log.info("Sending payload {}", i);
                     stream(payload).get();
                     log.info("Payload {} sent, sleeping", i);
-                    seastar::sleep(100ms).get();
+                    //seastar::sleep(100ms).get();
                 }
 
                 log.info("All data sent, sleeping before closing stream");
-                seastar::sleep(1s).get();
+                //seastar::sleep(100ms).get();
+
+                // if(should_flush){
+                //     log.info("Flushing stream before closing");
+                stream.flush().get();
+                //     log.info("Stream flushed");
+                // }
 
                 log.info("Closing stream");
                 stream.close().get();

@@ -21,6 +21,7 @@
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/reactor.hh>
 #include <seastar/rpc/rpc.hh>
 #include <seastar/core/sleep.hh>
 #include <iostream>
@@ -98,11 +99,36 @@ inline payload_t read(serializer, Input& in, rpc::type<payload_t>) {
     return ret;
 }
 
-using payload_t = std::vector<uint64_t>;
-
-enum rpc_verb { STREAM_INTS };
+enum class rpc_verb : int32_t {
+    STREAM_INTS = 1,
+};
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
+
+static promise<> _bye;
+
+future<> process_connection(rpc::source<payload_t> source) {
+    logger log("server-stream-handler");
+    while (true) {
+        try{
+            log.info("Waiting for data");
+            auto data = co_await source();
+            log.info("Received data");
+            if (!data) {
+                log.info("Stream closed");
+                break;
+            }
+            auto [payload] = *data;
+            log.info("Received payload of size: {}", payload.size());
+        } catch (const std::exception& e) {
+            log.info("Exception in stream source: {}", e.what());
+            break;
+        }
+    }
+    log.info("Stream handler done, signaling bye");
+    _bye.set_value();
+    co_return;
+}
 
 int main(int ac, char** av) {
     app_template app;
@@ -127,53 +153,60 @@ int main(int ac, char** av) {
             rpc_protocol proto(serializer{});
 
             if (is_server) {
-                promise<> _bye;
-                proto.register_handler(rpc_verb::STREAM_INTS, [&_bye] (rpc::source<payload_t> source) -> seastar::future<> {
-                    while (true) {
-                        try{
-                            auto data = co_await source();
-                            if (!data) {
-                                break;
-                            }
-                            auto [payload] = *data;
-                            std::cout << "Received payload of size: " << payload.size() << std::endl;
-                        } catch (const std::exception& e) {
-                            std::cout << "Exception in stream source: " << e.what() << std::endl;
-                            break;
-                        }
-                    }
-                    _bye.set_value();
-                    co_return;
+                logger log("server");
+                proto.register_handler(rpc_verb::STREAM_INTS, [] (rpc::source<payload_t> source) -> seastar::future<> {
+                    seastar::engine().run_in_background(process_connection(std::move(source)));
+                    return make_ready_future<>();
                 });
+
                 ipv4_addr listen_addr(addr, port);
                 rpc::server_options so;
+                so.streaming_domain = rpc::streaming_domain_type(1);
                 rpc::resource_limits limits;
                 auto server = std::make_unique<rpc_protocol::server>(proto, so, listen_addr, limits);
                 _bye.get_future().get();
+                log.info("Bye received, stopping server");
                 server->stop().get();
+                log.info("Server stopped");
                 return 0;
             } else {
+                static logger log("client");
+
                 ipv4_addr connect_addr(addr, port);
                 rpc::client_options co;
+
+                log.info("Creating client");
                 auto client = std::make_unique<rpc_protocol::client>(proto, co, connect_addr);
+
+                log.info("Client created, making stream sink");
                 auto stream = client->make_stream_sink<serializer, payload_t>().get();
+                log.info("Stream sink created");
+
+                log.info("Making RPC call");
                 auto call = proto.make_client<void(rpc::sink<payload_t>)>(rpc_verb::STREAM_INTS);
                 call(*client, stream).get();
 
+                log.info("RPC call made, sending data");
                 payload_t payload;
                 payload.resize(10);
                 std::iota(payload.begin(), payload.end(), 5);
 
                 for (int i = 0; i < 10; ++i) {
+                    log.info("Sending payload {}", i);
                     stream(payload).get();
+                    log.info("Payload {} sent, sleeping", i);
                     seastar::sleep(100ms).get();
                 }
 
-                fmt::print("Client done sending\n");
+                log.info("All data sent, sleeping before closing stream");
                 seastar::sleep(1s).get();
-                fmt::print("Client exiting\n");
+
+                log.info("Closing stream");
+                stream.close().get();
+
+                log.info("Client exiting");
                 client->stop().get();
-                fmt::print("Client stopped\n");
+                log.info("Client stopped");
                 return 0;
             }
         });

@@ -354,6 +354,7 @@ enum class rpc_verb : int32_t {
     ECHO = 2,
     WRITE = 3,
     STREAM_BIDIRECTIONAL = 4,
+    STREAM_UNIDIRECTIONAL = 5,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -499,10 +500,14 @@ public:
             , _payload_size_bytes(_cfg.payload) {
                 if (_cfg.verb == "bidirectional") {
                     _call = [this] (unsigned worker_id, const payload_t& payload) {
-                        return run_bidirectional_worker(worker_id, payload);
+                        return run_streaming_worker(worker_id, payload, rpc_verb::STREAM_BIDIRECTIONAL);
+                    };
+                } else if (_cfg.verb == "unidirectional") {
+                    _call = [this] (unsigned worker_id, const payload_t& payload) {
+                        return run_streaming_worker(worker_id, payload, rpc_verb::STREAM_UNIDIRECTIONAL);
                     };
                 } else {
-                    throw std::runtime_error("unknown verb, should be 'bidirectional'");
+                    throw std::runtime_error("unknown verb, should be 'bidirectional' or 'unidirectional'");
                 }
             }
 
@@ -530,10 +535,10 @@ private:
         });
     }
 
-    // Bidirectional worker: client sends payload_t and receives uint64_t totals from server
-    future<> run_bidirectional_worker(unsigned worker_id, const payload_t& payload) {
-        return _client->make_stream_sink<serializer, payload_t>().then([this, &payload] (rpc::sink<payload_t> sink) {
-            auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(rpc_verb::STREAM_BIDIRECTIONAL);
+    // Streaming worker: client sends payload_t and receives uint64_t totals from server
+    future<> run_streaming_worker(unsigned worker_id, const payload_t& payload, enum rpc_verb verb) {
+        return _client->make_stream_sink<serializer, payload_t>().then([this, &payload, verb] (rpc::sink<payload_t> sink) {
+            auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(verb);
             return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] (rpc::source<uint64_t> source) mutable {
                 auto sender = stream_data(std::move(sink), payload);
                 // Receiver: drain partial totals from server until EOS
@@ -613,6 +618,35 @@ public:
                         });
                     }).then([&total_messages, &total_payload] {
                         fmt::print("Server received total {} messages on bidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
+                    }).finally([&sink] {
+                        return sink.flush();
+                    }).finally([&sink] {
+                        return sink.close();
+                    });
+                });
+    }
+
+    static future<> process_uni_source(rpc::source<payload_t> source, rpc::sink<uint64_t> sink) {
+        return do_with(std::move(source), std::move(sink), uint64_t{0}, uint64_t{0},
+                [] (rpc::source<payload_t>& src, rpc::sink<uint64_t>& sink, uint64_t& total_messages, uint64_t& total_payload) {
+                    return repeat([&src, &sink, &total_messages, &total_payload] {
+                        return src().then([&sink, &total_messages, &total_payload](std::optional<std::tuple<payload_t>> data) {
+                            if (!data) {
+                                // We need to have some kind of synchronization with client, so they don't close the connection
+                                // before server received EOF. If we don't do that, server might receive `seastar::rpc::stream_closed` 
+                                // exception on reading from the source, as the stream is terminated on connection close.
+                                // In order to do that, we send back the total payload received when we get EOS from client.
+                                // This gives client the guarantee that server received all data before closing the connection.
+                                return sink(total_payload).then([] {
+                                    return stop_iteration::yes;
+                                });
+                            }
+                            ++total_messages;
+                            total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                            return make_ready_future<stop_iteration>(stop_iteration::no);
+                        });
+                    }).then([&total_messages, &total_payload] {
+                        fmt::print("Server received total {} messages on unidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
                     }).finally([&sink] {
                         return sink.flush();
                     }).finally([&sink] {
@@ -746,6 +780,13 @@ public:
             auto sink = source.make_sink<serializer, uint64_t>();
 
             (void)job_rpc_streaming::process_bi_source(std::move(source), sink);
+
+            return sink;
+        });
+        _rpc->register_handler(rpc_verb::STREAM_UNIDIRECTIONAL, [] (rpc::source<payload_t> source) {
+            auto sink = source.make_sink<serializer, uint64_t>();
+            
+            (void)job_rpc_streaming::process_uni_source(std::move(source), sink);
 
             return sink;
         });

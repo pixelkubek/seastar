@@ -47,6 +47,7 @@
 #include <seastar/core/print.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/shard_id.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/read_first_line.hh>
 
@@ -2037,13 +2038,28 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, std::any>& v
     }
 }
 
+unsigned
+select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
+    SEASTAR_ASSERT(!worker_cpus.empty());
+    const size_t selected_cpu_rank = get_uring_group_id(shard_id, worker_cpus);
+    return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
+}
+
+bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
+    return shard_id < worker_cpus.size();
+}
+
+unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
+    return shard_id % worker_cpus.size();
+}
+
 } // namespace uring
 
 
 class reactor_backend_asymmetric_uring final : public reactor_backend {
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)
-        : reactor_backend_uring_base(r, try_create_uring(uring::QUEUE_LEN, true).value()) {
+        : reactor_backend_uring_base(r, uring::try_create_asymmetric_uring(r._cfg.asymmetric_uring, true).value()) {
     }
 
     virtual std::string_view get_backend_name() const override {
@@ -2195,4 +2211,18 @@ std::vector<reactor_backend_selector> reactor_backend_selector::available() {
     return ret;
 }
 
+async_worker_allocation reactor_backend_selector::allocate_async_workers(const resource::cpuset& async_workers_cpu_set, const resource::cpuset& cpu_set) const {
+#ifdef SEASTAR_HAVE_URING
+    if (_name == "asymmetric_io_uring") {
+        if (async_workers_cpu_set.empty()) {
+            throw std::runtime_error("No CPUs specified for asymmetric_io_uring workers. Please see --async-workers-cpuset option.");
+        }
+
+        return {async_workers_cpu_set, cpu_set};
+    }
+#endif
+    return {{}, cpu_set};  // Other backends don't need workers
 }
+
+}
+

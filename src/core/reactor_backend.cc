@@ -1931,6 +1931,117 @@ namespace uring {
         return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
     }
 
+
+    std::optional<::io_uring>
+    try_create_asymmetric_uring_impl(::io_uring_params params, bool throw_on_error) {
+        auto required_features =
+                IORING_FEAT_SUBMIT_STABLE
+                | IORING_FEAT_NODROP
+                | IORING_FEAT_SQPOLL_NONFIXED;
+        auto required_ops = {
+                IORING_OP_POLL_ADD, // linux 5.1
+                IORING_OP_READV,
+                IORING_OP_WRITEV,
+                IORING_OP_FSYNC,
+                IORING_OP_SENDMSG,  // linux 5.3
+                IORING_OP_RECVMSG,
+                IORING_OP_ACCEPT,
+                IORING_OP_CONNECT,
+                IORING_OP_READ,     // linux 5.6
+                IORING_OP_WRITE,
+                IORING_OP_SEND,
+                IORING_OP_RECV,
+                };
+        auto maybe_throw = [&] (auto exception) {
+            if (throw_on_error) {
+                throw exception;
+            }
+        };
+    
+        ::io_uring ring;
+        auto err = ::io_uring_queue_init_params(QUEUE_LEN, &ring, &params);
+        if (err != 0) {
+            maybe_throw(std::system_error(std::error_code(-err, std::system_category()), "trying to create io_uring"));
+            return std::nullopt;
+        }
+        auto free_ring = defer([&] () noexcept { ::io_uring_queue_exit(&ring); });
+        ::io_uring_ring_dontfork(&ring);
+        if (~ring.features & required_features) {
+            maybe_throw(std::runtime_error(fmt::format("missing required io_ring features, required 0x{:x} available 0x{:x}", required_features, ring.features)));
+            return std::nullopt;
+        }
+    
+        auto probe = ::io_uring_get_probe_ring(&ring);
+        if (!probe) {
+            maybe_throw(std::runtime_error("unable to create io_uring probe"));
+            return std::nullopt;
+        }
+        auto free_probe = defer([&] () noexcept { ::io_uring_free_probe(probe); });
+    
+        for (auto op : required_ops) {
+            if (!io_uring_opcode_supported(probe, op)) {
+                maybe_throw(std::runtime_error(fmt::format("required io_uring opcode {} not supported", static_cast<int>(op))));
+                return std::nullopt;
+            }
+        }
+        
+        free_ring.cancel();
+        return ring;
+    }
+
+    std::optional<::io_uring>
+    try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error) {
+        auto params = ::io_uring_params{};
+        params.flags |= IORING_SETUP_ATTACH_WQ | IORING_SETUP_SQPOLL;
+        params.wq_fd = uring_fd;
+        return try_create_asymmetric_uring_impl(params, throw_on_error);
+    }
+
+    std::optional<::io_uring>
+    try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
+        auto maybe_throw = [&] (auto exception) {
+            if (throw_on_error) {
+                throw exception;
+            }
+        };
+
+        auto params = ::io_uring_params{};
+        params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+        params.sq_thread_cpu = worker_cpu;
+        params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
+
+        auto maybe_uring = try_create_asymmetric_uring_impl(params, throw_on_error);
+
+        if (!maybe_uring.has_value()) {
+            return std::nullopt;
+        }
+
+        auto ring = maybe_uring.value();
+
+        auto free_ring = defer([&] () noexcept { ::io_uring_queue_exit(&ring); });
+        
+        ::cpu_set_t worker_cpu_set;
+        CPU_ZERO(&worker_cpu_set);
+        CPU_SET(worker_cpu, &worker_cpu_set);
+        int err = ::io_uring_register_iowq_aff(&ring, sizeof(worker_cpu_set), &worker_cpu_set);
+        if (err != 0) {
+            maybe_throw(std::system_error(std::error_code(-err, std::system_category()), "trying to set io_uring worker affinity"));
+            return std::nullopt;
+        }
+        
+        free_ring.cancel();
+        return ring;
+    }
+
+    std::optional<::io_uring>
+    try_create_asymmetric_uring(const std::variant<int, std::any>& variant, bool throw_on_error) {
+        if (std::holds_alternative<int>(variant)) {
+            return try_create_attached_asymmetric_uring(std::get<int>(variant), throw_on_error);
+        } else {
+            return std::any_cast<::io_uring>(std::get<std::any>(variant));
+        }
+    }
+
     bool is_master_shard(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept {
         return shard_id < worker_cpus.size();
     }

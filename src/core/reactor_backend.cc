@@ -2647,4 +2647,24 @@ std::vector<reactor_backend_selector> reactor_backend_selector::available() {
     return ret;
 }
 
+unsigned reactor_backend_selector::num_async_workers(const resource::cpuset& cpu_set) const {
+#ifdef SEASTAR_HAVE_URING
+    if (_name == "asymmetric_io_uring") {
+        return uring::calculate_num_workers(cpu_set, uring::CPUS_PER_IO_URING_WORKER);
+    }
+#endif
+    return 0;
 }
+
+std::pair<resource::cpuset, resource::cpuset> reactor_backend_selector::allocate_async_workers(const resource::cpuset& cpu_set) const {
+#ifdef SEASTAR_HAVE_URING
+    if (_name == "asymmetric_io_uring") {
+        auto cfg = uring::allocate_cpus(cpu_set, uring::CPUS_PER_IO_URING_WORKER);
+        return {cfg.worker_cpus, cfg.app_cpus};
+    }
+#endif
+    return {{}, cpu_set};  // Other backends don't need workers
+}
+
+}
+

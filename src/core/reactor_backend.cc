@@ -2220,7 +2220,7 @@ private:
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)
             : _r(r)
-            , _uring(try_create_uring(uring::QUEUE_LEN, true).value())
+            , _uring(uring::try_create_asymmetric_uring(r._cfg.asymmetric_uring.value(), true).value())
             , _hrtimer_timerfd(make_timerfd())
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)

@@ -19,6 +19,11 @@
  * Copyright 2014 Cloudius Systems
  */
 
+#ifdef SEASTAR_HAVE_URING
+#include <liburing.h>
+#endif
+#include <memory>
+#include <vector>
 #ifdef SEASTAR_MODULE
 module;
 #endif
@@ -4510,6 +4515,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     }
 #endif
 
+    std::barrier asymmetric_uring_masters_created(smp::count);
     // Better to put it into the smp class, but at smp construction time
     // correct smp::count is not known.
     std::barrier reactors_registered(smp::count);
@@ -4591,11 +4597,27 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
         }
     };
 
+    auto master_uring_fds = std::make_shared<std::vector<int>>(smp::count, -1);
+
+    auto reactor_config = reactor_cfg;
+
+    #ifdef SEASTAR_HAVE_URING
+    if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
+        using namespace asymmetric_uring_factory;
+        const bool is_master = is_master_shard(0, async_worker_cpus);
+        const unsigned uring_group_id = get_uring_group_id(0, async_worker_cpus);
+        if (is_master) {
+            reactor_config.asymmetric_uring.emplace(try_create_base_asymmetric_uring(select_worker_cpu(0, async_worker_cpus), true).value());
+            (*master_uring_fds)[uring_group_id] = std::get<::io_uring>(reactor_config.asymmetric_uring.value()).ring_fd;
+        }
+    }
+    #endif
+
     unsigned i;
     auto smp_tmain = smp::_tmain;
     for (i = 1; i < smp::count; i++) {
         auto allocation = allocations[i];
-        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues] {
+        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, &async_worker_cpus, &master_uring_fds, &asymmetric_uring_masters_created] {
           try {
             // initialize thread_locals that are equal across all reacto threads of this smp instance
             smp::_tmain = smp_tmain;
@@ -4624,7 +4646,28 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
             throw_pthread_error(r);
             init_default_smp_service_group(i);
             lowres_clock::update();
-            allocate_reactor(i, backend_selector, reactor_cfg);
+
+            auto reactor_config = reactor_cfg;
+            
+            #ifdef SEASTAR_HAVE_URING
+            if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
+                using namespace asymmetric_uring_factory;
+                const bool is_master = is_master_shard(i, async_worker_cpus);
+                const unsigned uring_group_id = get_uring_group_id(i, async_worker_cpus);
+                if (is_master) {
+                    reactor_config.asymmetric_uring.emplace(try_create_base_asymmetric_uring(select_worker_cpu(i, async_worker_cpus), true).value());
+                    (*master_uring_fds)[uring_group_id] = std::get<::io_uring>(reactor_config.asymmetric_uring.value()).ring_fd;
+                }
+
+                asymmetric_uring_masters_created.arrive_and_wait();
+
+                if(!is_master) {
+                    reactor_config.asymmetric_uring.emplace((*master_uring_fds)[uring_group_id]);
+                }
+            }
+            #endif
+
+            allocate_reactor(i, backend_selector, reactor_config);
             reactors[i] = &engine();
             alloc_io_queues(i);
             allocate_qs_owner(i);
@@ -4646,8 +4689,21 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
 
     init_default_smp_service_group(0);
     lowres_clock::update();
+
+    #ifdef SEASTAR_HAVE_URING
+    if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
+        using namespace asymmetric_uring_factory;
+        asymmetric_uring_masters_created.arrive_and_wait();
+
+        if(!is_master_shard(0, async_worker_cpus)) {
+            reactor_config.asymmetric_uring.emplace((*master_uring_fds)[get_uring_group_id(0, async_worker_cpus)]);
+        }
+    }
+    #endif
+
+
     try {
-        allocate_reactor(0, backend_selector, reactor_cfg);
+        allocate_reactor(0, backend_selector, reactor_config);
     } catch (const std::exception& e) {
         seastar_logger.error("{}", e.what());
         _exit(1);

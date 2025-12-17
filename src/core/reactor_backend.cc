@@ -27,6 +27,8 @@ module;
 #include <filesystem>
 #include <thread>
 #include <utility>
+#include <type_traits>
+#include <any>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -36,6 +38,7 @@ module;
 #include <boost/container/small_vector.hpp>
 #include <fmt/core.h>
 #include <seastar/util/assert.hh>
+#include <sched.h>
 
 #ifdef SEASTAR_HAVE_URING
 #include <liburing.h>
@@ -53,6 +56,7 @@ module seastar;
 #include <seastar/core/print.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/shard_id.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/read_first_line.hh>
 #endif
@@ -1873,6 +1877,78 @@ public:
         return pollable_fd_state_ptr(new uring_pollable_fd_state(std::move(fd), std::move(speculate)));
     }
 };
+
+/// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
+/// Handles CPU allocation, worker thread management, and backend creation
+namespace uring {
+    /// Calculate how many worker threads are needed for the given CPU set
+    unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+        if (cores_per_worker == 0) {
+            return 0;
+        }
+
+        return cpu_set.size() / (cores_per_worker + 1);
+    }
+    
+    /// Allocate CPUs for workers
+    /// Returns configuration with both worker and app CPUs
+    config allocate_cpus(const resource::cpuset& cpu_set, unsigned cores_per_worker) {
+        config cfg;
+        cfg.cores_per_worker = cores_per_worker;
+        
+        unsigned num_workers = calculate_num_workers(cpu_set, cores_per_worker);
+        
+        if (num_workers == 0) {
+            seastar_logger.warn("Asymmetric io_uring: not enough CPUs for workers "
+                            "(need at least {} CPUs for 1 worker), using 0 workers",
+                            cores_per_worker + 1);
+            cfg.app_cpus = cpu_set;
+            return cfg;
+        }
+        
+        if (cpu_set.size() <= num_workers) {
+            throw std::runtime_error(
+                fmt::format("Asymmetric io_uring requires at least {} app core(s) + {} worker core(s), "
+                        "but only {} CPU(s) available",
+                        1, num_workers, cpu_set.size()));
+        }
+        
+        // Allocate last N cores for workers
+        std::copy(cpu_set.crbegin(),
+                std::next(cpu_set.crbegin(), num_workers),
+                std::inserter(cfg.worker_cpus, cfg.worker_cpus.end()));
+        
+        // Store app cores and remove workers from it
+        cfg.app_cpus = cpu_set;
+        for (auto cpu : cfg.worker_cpus) {
+            cfg.app_cpus.erase(cpu);
+        }
+        
+        seastar_logger.info("Asymmetric io_uring: {} app cores [{}], {} worker cores [{}]",
+                        cfg.app_cpus.size(), fmt::join(cfg.app_cpus, ","),
+                        cfg.worker_cpus.size(), fmt::join(cfg.worker_cpus, ","));
+        
+        return cfg;
+    }
+
+    unsigned
+    select_worker_cpu(unsigned id, const resource::cpuset& worker_cpus) {
+        SEASTAR_ASSERT(!worker_cpus.empty());
+        const size_t selected_cpu_rank = get_uring_group_id(id, worker_cpus);
+        return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
+    }
+
+    bool is_master_shard(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept {
+        return shard_id < worker_cpus.size();
+    }
+
+    unsigned get_uring_group_id(unsigned shard_id, const std::set<unsigned>& worker_cpus) noexcept {
+        return shard_id % worker_cpus.size();
+    }
+
+
+} // namespace uring
+
 
 class reactor_backend_asymmetric_uring final : public reactor_backend {
     reactor& _r;

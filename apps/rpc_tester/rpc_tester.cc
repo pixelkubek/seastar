@@ -590,8 +590,8 @@ public:
 
         auto total_bytes = _total_messages * _payload_size_bytes;
         if (_total_duration.count() > 0) {
-            double throughput_kBps = (total_bytes >> 10) / _total_duration.count();
-            out << YAML::Key << "throughput" << YAML::Value << throughput_kBps << YAML::Comment("kB/s");
+            double throughput = total_bytes / _total_duration.count();
+            out << YAML::Key << "throughput" << YAML::Value << throughput << YAML::Comment("B/s");
             
             double messages_per_sec = _total_messages / _total_duration.count();
             out << YAML::Key << "messages per second" << YAML::Value << messages_per_sec;

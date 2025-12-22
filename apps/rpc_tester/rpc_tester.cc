@@ -537,23 +537,24 @@ private:
 
     // Streaming worker: client sends payload_t and receives uint64_t totals from server
     future<> run_streaming_worker(unsigned worker_id, const payload_t& payload, enum rpc_verb verb) {
-        return _client->make_stream_sink<serializer, payload_t>().then([this, &payload, verb] (rpc::sink<payload_t> sink) {
-            auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(verb);
-            return rpc_call(*_client, sink).then([this, sink = std::move(sink), &payload] (rpc::source<uint64_t> source) mutable {
-                auto sender = stream_data(std::move(sink), payload);
-                // Receiver: drain partial totals from server until EOS
-                auto receiver = repeat([src = std::move(source)] () mutable {
-                    return src().then([] (std::optional<std::tuple<uint64_t>> data) {
-                        if (!data) {
-                            // EOS from server
-                            return stop_iteration::yes;
-                        }
-                        return stop_iteration::no;
-                    });
-                });
-                return when_all(std::move(sender), std::move(receiver)).discard_result();
+        auto sink = co_await _client->make_stream_sink<serializer, payload_t>();
+
+        auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(verb);
+        auto source = co_await rpc_call(*_client, sink);
+
+        auto sender = stream_data(std::move(sink), payload);
+        // Receiver: drain partial totals from server until EOS
+        auto receiver = repeat([src = std::move(source)] () mutable {
+            return src().then([] (std::optional<std::tuple<uint64_t>> data) {
+                if (!data) {
+                    // EOS from server
+                    return stop_iteration::yes;
+                }
+                return stop_iteration::no;
             });
         });
+
+        co_await when_all(std::move(sender), std::move(receiver));
     }
 
 public:

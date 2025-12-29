@@ -626,32 +626,31 @@ public:
     }
 
     static future<> process_uni_source(rpc::source<payload_t> source, rpc::sink<uint64_t> sink) {
-        return do_with(std::move(source), std::move(sink), uint64_t{0}, uint64_t{0},
-                [] (rpc::source<payload_t>& src, rpc::sink<uint64_t>& sink, uint64_t& total_messages, uint64_t& total_payload) {
-                    return repeat([&src, &sink, &total_messages, &total_payload] {
-                        return src().then([&sink, &total_messages, &total_payload](std::optional<std::tuple<payload_t>> data) {
-                            if (!data) {
-                                // We need to have some kind of synchronization with client, so they don't close the connection
-                                // before server received EOF. If we don't do that, server might receive `seastar::rpc::stream_closed` 
-                                // exception on reading from the source, as the stream is terminated on connection close.
-                                // In order to do that, we send back the total payload received when we get EOS from client.
-                                // This gives client the guarantee that server received all data before closing the connection.
-                                return sink(total_payload).then([] {
-                                    return stop_iteration::yes;
-                                });
-                            }
-                            ++total_messages;
-                            total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                            return make_ready_future<stop_iteration>(stop_iteration::no);
-                        });
-                    }).then([&total_messages, &total_payload] {
-                        fmt::print("Server received total {} messages on unidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
-                    }).finally([&sink] {
-                        return sink.flush();
-                    }).finally([&sink] {
-                        return sink.close();
+        uint64_t total_messages = 0, total_payload = 0;
+
+        co_await repeat([&source, &sink, &total_messages, &total_payload] {
+            return source().then([&sink, &total_messages, &total_payload](std::optional<std::tuple<payload_t>> data) {
+                if (!data) {
+                    // We need to have some kind of synchronization with client, so they don't close the connection
+                    // before server received EOF. If we don't do that, server might receive `seastar::rpc::stream_closed` 
+                    // exception on reading from the source, as the stream is terminated on connection close.
+                    // In order to do that, we send back the total payload received when we get EOS from client.
+                    // This gives client the guarantee that server received all data before closing the connection.
+                    return sink(total_payload).then([] {
+                        return stop_iteration::yes;
                     });
-                });
+                }
+                ++total_messages;
+                total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                return make_ready_future<stop_iteration>(stop_iteration::no);
+            });
+        }).finally([&sink] {
+            return sink.flush();
+        }).finally([&sink] {
+            return sink.close();
+        });
+
+        fmt::print("Server received total {} messages on unidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
     }
 };
 

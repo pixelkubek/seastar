@@ -559,6 +559,14 @@ private:
         co_await when_all(std::move(sender), std::move(receiver));
     }
 
+    future<> run_worker_with_delay(unsigned worker_id, const payload_t& payload) {
+        if (_cfg.sleep_time) {
+            auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id);
+            co_await seastar::sleep(delay);
+        }
+        co_await _call(worker_id, payload);
+    }
+
 public:
     virtual future<> run() override {
         return with_scheduling_group(_cfg.sg, [this] {
@@ -568,16 +576,8 @@ public:
             _client = std::make_unique<rpc_protocol::client>(_rpc, co, _caddr);
             _start_time = std::chrono::steady_clock::now();
 
-            return do_with(std::move(payload), [this] (const payload_t& payload) {
-                return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (unsigned worker_id) {
-                    auto initial_delay = _cfg.sleep_time
-                        ? seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id))
-                        : make_ready_future<>();
-
-                    return initial_delay.then([this, worker_id] {
-                        return _call(worker_id, _payload);
-                    });
-                });
+            return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (unsigned worker_id) {
+                return run_worker_with_delay(worker_id, _payload);
             }).finally([this] {
                 _total_duration = std::chrono::steady_clock::now() - _start_time;
                 return _client->stop();

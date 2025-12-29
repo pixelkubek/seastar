@@ -489,6 +489,7 @@ class job_rpc_streaming : public job {
     uint64_t _payload_size_bytes = 0;
     std::chrono::steady_clock::time_point _start_time{};
     std::chrono::duration<double> _total_duration{0.0};
+    payload_t _payload;
 
 public:
     job_rpc_streaming(job_config cfg, rpc_protocol& rpc, client_config ccfg, socket_address caddr)
@@ -497,7 +498,8 @@ public:
             , _ccfg(ccfg)
             , _rpc(rpc)
             , _stop(std::chrono::steady_clock::now() + _cfg.duration)
-            , _payload_size_bytes(_cfg.payload) {
+            , _payload_size_bytes(_cfg.payload),
+            _payload(_cfg.payload / sizeof(payload_t::value_type), 0) {
                 if (_cfg.verb == "bidirectional") {
                     _call = [this] (unsigned worker_id, const payload_t& payload) {
                         return run_streaming_worker(worker_id, payload, rpc_verb::STREAM_BIDIRECTIONAL);
@@ -566,17 +568,14 @@ public:
             _client = std::make_unique<rpc_protocol::client>(_rpc, co, _caddr);
             _start_time = std::chrono::steady_clock::now();
 
-            payload_t payload;
-            payload.resize(_cfg.payload / sizeof(payload_t::value_type), 0);
-
             return do_with(std::move(payload), [this] (const payload_t& payload) {
-                return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this, &payload] (unsigned worker_id) {
+                return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (unsigned worker_id) {
                     auto initial_delay = _cfg.sleep_time
                         ? seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time / _cfg.parallelism * worker_id))
                         : make_ready_future<>();
-                    
-                    return initial_delay.then([this, worker_id, &payload] {
-                        return _call(worker_id, payload);
+
+                    return initial_delay.then([this, worker_id] {
+                        return _call(worker_id, _payload);
                     });
                 });
             }).finally([this] {

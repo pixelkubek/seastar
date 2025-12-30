@@ -360,10 +360,6 @@ public:
     static reactor_backend_selector default_backend();
     static std::vector<reactor_backend_selector> available();
     
-    /// Returns the number of CPUs this backend wants to dedicate as async workers
-    /// Returns 0 for backends that don't need dedicated async workers
-    unsigned num_async_workers(const resource::cpuset& cpu_set) const;
-    
     /// Assigns set of cpus for backends that need dedicated async workers.
     /// Returns a pair (allocated CPUs, cpu_set \ allocated_cpus) for backends that need dedicated async workers
     /// For backends that don't need dedicated async workers the pair returned is ({}, cpu_set)
@@ -380,19 +376,6 @@ public:
 /// Factory that manages the lifecycle and configuration of asymmetric io_uring backend
 /// Handles CPU allocation, worker thread management, and backend creation
 namespace uring {
-    /// Configuration for asymmetric io_uring backend
-    struct config {
-        unsigned cores_per_worker; // How many app cores per worker thread
-        resource::cpuset worker_cpus; // CPUs allocated for async workers
-        resource::cpuset app_cpus; // CPUs for application (reactors)
-    };
-
-    /// Calculate how many worker threads are needed for the given CPU set
-    unsigned calculate_num_workers(const resource::cpuset& cpu_set, unsigned cores_per_worker);
-    
-    /// Returns configuration with both worker and app CPUs
-    config allocate_cpus(const resource::cpuset& cpu_set, unsigned cores_per_worker);
-
     unsigned
     select_worker_cpu(unsigned id, const std::set<unsigned>& worker_cpus);
 

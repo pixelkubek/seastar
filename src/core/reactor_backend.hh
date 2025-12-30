@@ -28,12 +28,18 @@
 #include <seastar/core/internal/poll.hh>
 #include <seastar/core/internal/linux-aio.hh>
 #include <seastar/core/cacheline.hh>
+#include <seastar/core/reactor_config.hh>
 #include <seastar/util/bool_class.hh>
+#include <seastar/core/shard_id.hh>
+#include <seastar/core/resource.hh>
 
 #include <fmt/ostream.h>
 #include <sys/time.h>
 #include <thread>
 #include <stack>
+#include <memory>
+#include <vector>
+#include <optional>
 #include <boost/any.hpp>
 #include <boost/program_options.hpp>
 #include <boost/container/static_vector.hpp>
@@ -46,7 +52,6 @@
 namespace seastar {
 
 class reactor;
-
 // FIXME: merge it with storage context below. At this point the
 // main thing to do is unify the iocb list
 struct aio_general_context {
@@ -371,6 +376,7 @@ class reactor_backend_selector {
     std::string _name;
 private:
     static bool has_enough_aio_nr();
+    bool is_asymmetric() const noexcept;
     explicit reactor_backend_selector(std::string name) : _name(std::move(name)) {}
 public:
     const std::string& name() const { return _name; }
@@ -380,6 +386,13 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const reactor_backend_selector& rbs) {
         return os << rbs._name;
     }
+
+    struct uring_groups_init_result {
+        std::optional<compile_safe_io_uring> ring;
+        unsigned group_id;
+    };
+    uring_groups_init_result init_uring_groups(shard_id id, std::vector<int>& master_uring_fds, const resource::cpuset& async_worker_cpus) const;
+    std::variant<std::monostate, int, compile_safe_io_uring> finalize_uring_groups(uring_groups_init_result init_results, std::vector<int>& master_uring_fds) const;
 };
 
 #ifdef SEASTAR_HAVE_URING
@@ -393,6 +406,13 @@ try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error);
 
 std::optional<::io_uring>
 try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error);
+bool initialize_uring_groups(seastar::shard_id shard_id, reactor_config& reactor_cfg, const std::shared_ptr<std::vector<int>>& master_uring_fds, const resource::cpuset& async_worker_cpus, unsigned* uring_group_id = nullptr);
+
+unsigned select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus);
+
+bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;
+
+unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;
 
 // QUEUE_LEN is more or less arbitrary. Too low and we'll be
 // issuing too small batches, too high and we require too much locked

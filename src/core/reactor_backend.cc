@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <fcntl.h>
@@ -48,6 +49,7 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/core/reactor_config.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/shard_id.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/read_first_line.hh>
 
@@ -2064,6 +2066,37 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, compile_safe
     }
 }
 
+bool initialize_uring_groups(shard_id shard, reactor_config& reactor_cfg,
+        const std::shared_ptr<std::vector<int>>& master_uring_fds,
+        const resource::cpuset& async_worker_cpus,
+        unsigned* uring_group_id_out) {
+    const bool is_master = is_master_shard(shard, async_worker_cpus);
+    const unsigned uring_group_id = get_uring_group_id(shard, async_worker_cpus);
+    if (uring_group_id_out) {
+        *uring_group_id_out = uring_group_id;
+    }
+    if (is_master) {
+        reactor_cfg.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(select_worker_cpu(shard, async_worker_cpus), true).value());
+        (*master_uring_fds)[uring_group_id] = std::any_cast<::io_uring>(std::get<compile_safe_io_uring>(reactor_cfg.asymmetric_uring)).ring_fd;
+    }
+    return is_master;
+}
+
+unsigned
+select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
+    SEASTAR_ASSERT(!worker_cpus.empty());
+    const size_t selected_cpu_rank = get_uring_group_id(shard_id, worker_cpus);
+    return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
+}
+
+bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
+    return shard_id < worker_cpus.size();
+}
+
+unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
+    return shard_id % worker_cpus.size();
+}
+
 } // namespace uring
 
 class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
@@ -2192,6 +2225,10 @@ bool reactor_backend_selector::has_enough_aio_nr() {
     return true;
 }
 
+bool reactor_backend_selector::is_asymmetric() const noexcept {
+    return name() == "asymmetric_io_uring";
+}
+
 std::unique_ptr<reactor_backend> reactor_backend_selector::create(reactor& r) {
     if (_name == "io_uring") {
 #ifdef SEASTAR_HAVE_URING
@@ -2234,4 +2271,35 @@ std::vector<reactor_backend_selector> reactor_backend_selector::available() {
     return ret;
 }
 
+reactor_backend_selector::uring_groups_init_result reactor_backend_selector::init_uring_groups(shard_id shard, std::vector<int>& master_uring_fds, const resource::cpuset& async_worker_cpus) const {
+#ifdef SEASTAR_HAVE_URING
+    if (is_asymmetric()) {
+        using namespace uring;
+        const bool is_master = is_master_shard(shard, async_worker_cpus);
+        const unsigned uring_group_id = get_uring_group_id(shard, async_worker_cpus);
+
+        if (is_master) {
+            auto created_uring = try_create_base_asymmetric_uring(select_worker_cpu(shard, async_worker_cpus), true).value();
+            master_uring_fds.at(uring_group_id) = created_uring.ring_fd;
+            return {created_uring, uring_group_id};
+        } else {
+            return {std::nullopt, uring_group_id};
+        }
+    }
+#endif 
+    return {};
+}
+
+std::variant<std::monostate, int, compile_safe_io_uring> reactor_backend_selector::finalize_uring_groups(uring_groups_init_result init_result,  std::vector<int>& master_uring_fds) const {
+#ifdef SEASTAR_HAVE_URING
+    if (is_asymmetric()) {
+        if (init_result.ring.has_value()) { // The shard is a master.
+            return init_result.ring.value();
+        }
+
+        return master_uring_fds.at(init_result.group_id);
+    }
+#endif
+    return std::monostate{};
+}
 }

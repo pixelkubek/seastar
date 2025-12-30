@@ -4260,7 +4260,7 @@ unsigned smp::adjust_max_networking_aio_io_control_blocks(unsigned network_iocbs
 }
 
 static inline void warn_if_shards_and_async_workers_share_cpu(const std::vector<resource::cpu>& allocations, const resource::cpuset& async_worker_cpus) {
-    std::set<unsigned int> overlapping_cpus;
+    std::set<unsigned> overlapping_cpus;
     for (auto cpu : allocations) {
         if (async_worker_cpus.contains(cpu.cpu_id)) {
             overlapping_cpus.insert(cpu.cpu_id);
@@ -4268,13 +4268,9 @@ static inline void warn_if_shards_and_async_workers_share_cpu(const std::vector<
     }
 
     if (!overlapping_cpus.empty()) {
-        std::ostringstream overlapping_cpus_list;
-        for (auto cpu_id : overlapping_cpus) {
-            overlapping_cpus_list << " " << cpu_id;
-        }
-        seastar_logger.warn("The following CPUs assigned to shards overlap with the async workers cpuset:{}."
+        seastar_logger.warn("The following CPUs assigned to shards overlap with the async workers cpuset: {}."
                              " This may lead to performance degradation. It is recommended to keep the main"
-                             " cpuset and async workers cpuset disjoint.", overlapping_cpus_list.str());
+                             " cpuset and async workers cpuset disjoint.", fmt::join(overlapping_cpus, ","));
     }
 }
 
@@ -4358,6 +4354,14 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     resource::cpuset async_worker_cpus;
     try {
         std::tie(async_worker_cpus, cpu_set) = backend_selector.allocate_async_workers(reactor_opts.async_workers_cpuset.get_value(), cpu_set);
+
+        // If smp_opts.cpuset was not specified, remove async worker CPUs from the main cpuset.
+        if (!smp_opts.cpuset) {
+            seastar_logger.trace("Removing async worker CPUs from main cpuset");
+            for (auto cpu_id : async_worker_cpus) {
+                cpu_set.erase(cpu_id);
+            }
+        }
 
         seastar_logger.debug("Backend async workers allocated: {} potential app cores [{}], {} worker cores [{}]",
                 cpu_set.size(), fmt::join(cpu_set, ","),

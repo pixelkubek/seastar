@@ -2675,11 +2675,14 @@ unsigned reactor_backend_selector::num_async_workers(const resource::cpuset& cpu
     return 0;
 }
 
-std::pair<resource::cpuset, resource::cpuset> reactor_backend_selector::allocate_async_workers(const resource::cpuset& cpu_set) const {
+std::pair<resource::cpuset, resource::cpuset> reactor_backend_selector::allocate_async_workers(const resource::cpuset& async_workers_cpu_set, const resource::cpuset& cpu_set) const {
 #ifdef SEASTAR_HAVE_URING
     if (_name == "asymmetric_io_uring") {
-        auto cfg = uring::allocate_cpus(cpu_set, uring::CPUS_PER_IO_URING_WORKER);
-        return {cfg.worker_cpus, cfg.app_cpus};
+        if (async_workers_cpu_set.empty()) {
+            throw std::runtime_error("No CPUs specified for asymmetric_io_uring workers. Please see --async-workers-cpuset option.");
+        }
+
+        return {async_workers_cpu_set, cpu_set};
     }
 #endif
     return {{}, cpu_set};  // Other backends don't need workers

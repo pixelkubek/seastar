@@ -601,7 +601,7 @@ public:
         }
     }
 
-    static future<> process_bi_source(rpc::source<payload_t> source, rpc::sink<uint64_t> sink) {
+    static future<> process_bi_source(rpc::source<payload_t> source, rpc::sink<payload_t> sink) {
         uint64_t total_messages = 0, total_payload = 0;
 
         co_await repeat([&source, &sink, &total_messages, &total_payload] {
@@ -611,8 +611,8 @@ public:
                 }
                 ++total_messages;
                 total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                // Send current total_payload back to client
-                return sink(total_payload).then([] {
+                // Send data back to client
+                return sink(std::get<0>(*data)).then([] {
                     return stop_iteration::no;
                 });
             });
@@ -775,7 +775,7 @@ public:
         });
         _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
             // Create sink for server->client direction
-            auto sink = source.make_sink<serializer, uint64_t>();
+            auto sink = source.make_sink<serializer, payload_t>();
 
             (void)job_rpc_streaming::process_bi_source(std::move(source), sink);
 

@@ -368,7 +368,7 @@ public:
     /// Returns a pair (allocated CPUs, cpu_set \ allocated_cpus) for backends that need dedicated async workers
     /// For backends that don't need dedicated async workers the pair returned is ({}, cpu_set)
     /// Throws if there aren't enough CPUs available
-    std::pair<resource::cpuset, resource::cpuset> allocate_async_workers(const resource::cpuset& cpu_set) const;
+    std::pair<resource::cpuset, resource::cpuset> allocate_async_workers(const resource::cpuset& async_workers_cpu_set, const resource::cpuset& cpu_set) const;
     
     friend std::ostream& operator<<(std::ostream& os, const reactor_backend_selector& rbs) {
         return os << rbs._name;

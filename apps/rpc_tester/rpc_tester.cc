@@ -610,9 +610,10 @@ public:
                     return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
                 ++total_messages;
-                total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+                auto received_vector = std::move(std::get<0>(*data));
+                total_payload += received_vector.size() * sizeof(payload_t::value_type);
                 // Send data back to client
-                return sink(std::get<0>(*data)).then([] {
+                return sink(received_vector).then([] {
                     return stop_iteration::no;
                 });
             });

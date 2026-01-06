@@ -537,17 +537,20 @@ private:
         });
     }
 
-    // Streaming worker: client sends payload_t and receives uint64_t totals from server
+    // Streaming worker: 
+    // - client sends payload_t
+    // - in bidirectional case: server echoes back payload_t
+    // - in unidirectional case: server only sends EOS at the end
     future<> run_streaming_worker(unsigned worker_id, const payload_t& payload, enum rpc_verb verb) {
         auto sink = co_await _client->make_stream_sink<serializer, payload_t>();
 
-        auto rpc_call = _rpc.make_client<rpc::source<uint64_t>(rpc::sink<payload_t>)>(verb);
+        auto rpc_call = _rpc.make_client<rpc::source<payload_t>(rpc::sink<payload_t>)>(verb);
         auto source = co_await rpc_call(*_client, sink);
 
         auto sender = stream_data(std::move(sink), payload);
-        // Receiver: drain partial totals from server until EOS
+
         auto receiver = repeat([src = std::move(source)] () mutable {
-            return src().then([] (std::optional<std::tuple<uint64_t>> data) {
+            return src().then([] (std::optional<std::tuple<payload_t>> data) {
                 if (!data) {
                     // EOS from server
                     return stop_iteration::yes;
@@ -632,18 +635,18 @@ public:
         co_await repeat([&source, &sink, &total_messages, &total_payload] {
             return source().then([&sink, &total_messages, &total_payload](std::optional<std::tuple<payload_t>> data) {
                 if (!data) {
-                    // We need to have some kind of synchronization with client, so they don't close the connection
-                    // before server received EOF. If we don't do that, server might receive `seastar::rpc::stream_closed` 
-                    // exception on reading from the source, as the stream is terminated on connection close.
-                    // In order to do that, we send back the total payload received when we get EOS from client.
-                    // This gives client the guarantee that server received all data before closing the connection.
-                    return sink(total_payload).then([] {
-                        return stop_iteration::yes;
-                    });
+                    // We need to have some kind of synchronization with client, so they don't close the main RPC connection
+                    // until server received EOS (client -> server connection was closed). If we don't do that, server might 
+                    // receive `seastar::rpc::stream_closed` exception on reading from the source, as the stream is terminated 
+                    // on connection close.
+                    // In order to do that, we create a connection to the other side - from server to client, and keep it
+                    // open until client sends EOS - then, by closing this connection, server also sends EOS.
+                    // This gives client the guarantee that server received all data before closing the main RPC connection.
+                    return stop_iteration::yes;
                 }
                 ++total_messages;
                 total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
-                return make_ready_future<stop_iteration>(stop_iteration::no);
+                return stop_iteration::no;
             });
         }).finally([&sink] {
             return sink.flush();

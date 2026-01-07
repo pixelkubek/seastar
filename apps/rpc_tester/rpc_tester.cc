@@ -354,6 +354,7 @@ enum class rpc_verb : int32_t {
     ECHO = 2,
     WRITE = 3,
     STREAM_BIDIRECTIONAL = 4,
+    STREAM_UNIDIRECTIONAL = 5,
 };
 
 using rpc_protocol = rpc::protocol<serializer, rpc_verb>;
@@ -503,6 +504,10 @@ public:
             _call = [this] (unsigned worker_id, const payload_t& payload) {
                 return run_streaming_worker(worker_id, payload, rpc_verb::STREAM_BIDIRECTIONAL);
             };
+        } else if (_cfg.verb == "unidirectional") {
+            _call = [this] (unsigned worker_id, const payload_t& payload) {
+                return run_streaming_worker(worker_id, payload, rpc_verb::STREAM_UNIDIRECTIONAL);
+            };
         } else {
             throw std::runtime_error("unknown verb, should be 'bidirectional' or 'unidirectional'");
         }
@@ -512,29 +517,38 @@ public:
 
 private:
     future<> stream_data(rpc::sink<payload_t> sink, const payload_t& payload) {
-        return do_with(std::move(sink), [this, &payload] (rpc::sink<payload_t>& sink) {
+        std::exception_ptr error;
+        try {
             // Send data through the sink until stop time
-            return do_until([this] {
-                return std::chrono::steady_clock::now() > _stop;
-            }, [this, &sink, &payload] {
+            while (std::chrono::steady_clock::now() <= _stop) {
                 ++_total_messages;
-                return sink(payload).then([this] {
-                    if (_cfg.sleep_time) {
-                        return seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
-                    }
-                    return make_ready_future<>();
-                });
-            }).finally([&sink] {
-                return sink.flush();
-            }).finally([&sink] {
-                return sink.close();
-            });
-        });
+                co_await sink(payload);
+                if (_cfg.sleep_time) {
+                    co_await seastar::sleep(std::chrono::duration_cast<std::chrono::nanoseconds>(*_cfg.sleep_time));
+                }
+            }
+        } catch (...) {
+            error = std::current_exception();
+        }
+
+        try {
+            co_await sink.flush();
+        } catch (...) {
+        }
+        try {
+            co_await sink.close();
+        } catch (...) {
+        }
+
+        if (error) {
+            std::rethrow_exception(error);
+        }
     }
 
     // Streaming worker: 
     // - client sends payload_t
     // - in bidirectional case: server echoes back payload_t
+    // - in unidirectional case: server only sends EOS at the end
     future<> run_streaming_worker(unsigned worker_id, const payload_t& payload, enum rpc_verb verb) {
         auto sink = co_await _client->make_stream_sink<serializer, payload_t>();
 
@@ -600,27 +614,78 @@ public:
 
     static future<> process_bi_source(rpc::source<payload_t> source, rpc::sink<payload_t> sink) {
         uint64_t total_messages = 0, total_payload = 0;
+        std::exception_ptr error;
 
-        co_await repeat([&source, &sink, &total_messages, &total_payload] {
-            return source().then([&sink, &total_messages, &total_payload](std::optional<std::tuple<payload_t>> data) {
+        try {
+            while (true) {
+                auto data = co_await source();
                 if (!data) {
-                    return make_ready_future<stop_iteration>(stop_iteration::yes);
+                    break;
                 }
                 ++total_messages;
                 auto received_data = std::move(std::get<0>(*data));
                 total_payload += received_data.size() * sizeof(payload_t::value_type);
                 // Send data back to client
-                return sink(received_data).then([] {
-                    return stop_iteration::no;
-                });
-            });
-        }).finally([&sink] {
-            return sink.flush();
-        }).finally([&sink] {
-            return sink.close();
-        });
+                co_await sink(received_data);
+            }
+        } catch (...) {
+            error = std::current_exception();
+        }
+
+        try {
+            co_await sink.flush();
+        } catch (...) {
+        }
+        try {
+            co_await sink.close();
+        } catch (...) {
+        }
+
+        if (error) {
+            std::rethrow_exception(error);
+        }
 
         fmt::print("Server received total {} messages on bidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
+    }
+
+    static future<> process_uni_source(rpc::source<payload_t> source, rpc::sink<uint64_t> sink) {
+        uint64_t total_messages = 0, total_payload = 0;
+        std::exception_ptr error;
+
+        try {
+            while (true) {
+                auto data = co_await source();
+                if (!data) {
+                    // We need to have some kind of synchronization with client, so they don't close the main RPC connection
+                    // until server received EOS (client -> server connection was closed). If we don't do that, server might 
+                    // receive `seastar::rpc::stream_closed` exception on reading from the source, as the stream is terminated 
+                    // on connection close.
+                    // In order to do that, we create a connection to the other side - from server to client, and keep it
+                    // open until client sends EOS - then, by closing this connection, server also sends EOS.
+                    // This gives client the guarantee that server received all data before closing the main RPC connection.
+                    break;
+                }
+                ++total_messages;
+                total_payload += std::get<0>(*data).size() * sizeof(payload_t::value_type);
+            }
+        } catch (...) {
+            error = std::current_exception();
+        }
+
+        try {
+            co_await sink.flush();
+        } catch (...) {
+        }
+        try {
+            co_await sink.close();
+        } catch (...) {
+        }
+
+        if (error) {
+            std::rethrow_exception(error);
+        }
+
+        fmt::print("Server received total {} messages on unidirectional stream, total payload: {} bytes\n", total_messages, total_payload);
     }
 };
 
@@ -748,6 +813,13 @@ public:
             auto sink = source.make_sink<serializer, payload_t>();
 
             (void)job_rpc_streaming::process_bi_source(std::move(source), sink);
+
+            return sink;
+        });
+        _rpc->register_handler(rpc_verb::STREAM_UNIDIRECTIONAL, [] (rpc::source<payload_t> source) {
+            auto sink = source.make_sink<serializer, uint64_t>();
+            
+            (void)job_rpc_streaming::process_uni_source(std::move(source), sink);
 
             return sink;
         });

@@ -616,7 +616,7 @@ public:
                 auto received_data = std::move(std::get<0>(*data));
                 total_payload += received_data.size() * sizeof(payload_t::value_type);
                 // Send data back to client
-                return sink(std::move(received_data)).then([] {
+                return sink(received_data).then([] {
                     return stop_iteration::no;
                 });
             });

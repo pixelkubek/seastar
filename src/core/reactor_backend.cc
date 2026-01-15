@@ -1969,6 +1969,7 @@ namespace uring {
     try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error) {
         auto params = ::io_uring_params{};
         params.flags |= IORING_SETUP_ATTACH_WQ | IORING_SETUP_SQPOLL;
+        params.flags |= IORING_SETUP_SINGLE_ISSUER;
         params.wq_fd = uring_fd;
         return try_create_asymmetric_uring_impl(params, throw_on_error);
     }
@@ -1983,6 +1984,7 @@ namespace uring {
 
         auto params = ::io_uring_params{};
         params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+        params.flags |= IORING_SETUP_SINGLE_ISSUER;
         params.sq_thread_cpu = worker_cpu;
         params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
 

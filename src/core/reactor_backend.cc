@@ -1969,7 +1969,7 @@ namespace uring {
     try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error) {
         auto params = ::io_uring_params{};
         params.flags |= IORING_SETUP_ATTACH_WQ | IORING_SETUP_SQPOLL;
-        params.flags |= IORING_SETUP_SINGLE_ISSUER;
+        params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         params.wq_fd = uring_fd;
         return try_create_asymmetric_uring_impl(params, throw_on_error);
     }
@@ -1984,7 +1984,7 @@ namespace uring {
 
         auto params = ::io_uring_params{};
         params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
-        params.flags |= IORING_SETUP_SINGLE_ISSUER;
+        params.flags |= IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
         params.sq_thread_cpu = worker_cpu;
         params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
 
@@ -2183,6 +2183,7 @@ private:
     // Returns true if completions were processed
     bool do_process_kernel_completions() {
         auto did_work = false;
+        (void)io_uring_enter(_uring.ring_fd, 0, 0, 0, NULL);
         while (do_process_kernel_completions_step()) {
             did_work = true;
         }
@@ -2238,6 +2239,7 @@ public:
         struct ::io_uring_cqe* cqe = nullptr;
         sigset_t sigs = *active_sigmask; // io_uring_wait_cqes() wants non-const
         const auto before_wait_cqes = sched_clock::now();
+        (void)io_uring_enter(_uring.ring_fd, 0, 0, 0, NULL);
         auto r = ::io_uring_wait_cqes(&_uring, &cqe, 1, nullptr, &sigs);
         _r._total_sleep += sched_clock::now() - before_wait_cqes;
         if (__builtin_expect(r < 0, false)) {

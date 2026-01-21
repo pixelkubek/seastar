@@ -4340,6 +4340,14 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     try {
         std::tie(async_worker_cpus, cpu_set) = backend_selector.allocate_async_workers(reactor_opts.async_workers_cpuset.get_value(), cpu_set);
 
+        // If smp_opts.cpuset was not specified, remove async worker CPUs from the main cpuset.
+        if (!smp_opts.cpuset) {
+            seastar_logger.trace("Removing async worker CPUs from main cpuset");
+            for (auto cpu_id : async_worker_cpus) {
+                cpu_set.erase(cpu_id);
+            }
+        }
+
         seastar_logger.debug("Backend async workers allocated: {} potential app cores [{}], {} worker cores [{}]",
                 cpu_set.size(), fmt::join(cpu_set, ","),
                 async_worker_cpus.size(), fmt::join(async_worker_cpus, ","));

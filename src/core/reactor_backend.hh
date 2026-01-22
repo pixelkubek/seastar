@@ -38,6 +38,10 @@
 #include <boost/container/static_vector.hpp>
 
 
+#ifdef SEASTAR_HAVE_URING
+#include <liburing.h>
+#endif
+
 namespace seastar {
 
 class reactor;
@@ -359,7 +363,14 @@ public:
 /// Handles CPU allocation, worker thread management, and backend creation
 namespace uring {
 
+std::optional<::io_uring>
+try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error);
+
+std::optional<::io_uring>
+try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error);
+
 inline constexpr unsigned QUEUE_LEN = 200;
+inline constexpr std::chrono::milliseconds POLLER_SLEEP_TIMEOUT(2000);
 
 } // namespace uring
 

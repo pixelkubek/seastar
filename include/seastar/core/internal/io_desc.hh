@@ -33,5 +33,9 @@ protected:
      ~kernel_completion() = default;
 public:
     virtual void complete_with(ssize_t res) = 0;
+
+    virtual bool is_uring_buf_ring_completion() noexcept {
+        return false;
+    }
 };
 }

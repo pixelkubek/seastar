@@ -27,6 +27,7 @@ module;
 #include <filesystem>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -2038,6 +2039,34 @@ unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& 
     return shard_id % worker_cpus.size();
 }
 
+class buf_group_io_completion final: public io_completion {
+    std::optional<temporary_buffer<char>> _buffer_opt;
+    promise<temporary_buffer<char>> _result;
+public:
+    buf_group_io_completion(pollable_fd_state& fd) {}
+    void complete(size_t bytes) noexcept final {
+        try {
+            _buffer_opt.value().trim(bytes);
+            _result.set_value(std::move(_buffer_opt.value()));
+        } catch (...) {
+            set_exception(std::current_exception());
+        }
+        delete this;
+    }
+    void set_exception(std::exception_ptr eptr) noexcept final {
+        _result.set_exception(eptr);
+        delete this;
+    }
+    future<temporary_buffer<char>> get_future() {
+        return _result.get_future();
+    }
+    void set_buffer(temporary_buffer<char> buffer) noexcept {
+        _buffer_opt.emplace(std::move(buffer));
+    }
+    bool is_uring_buf_ring_completion() noexcept override {
+        return true;
+    }
+};
 } // namespace uring
 
 
@@ -2175,6 +2204,9 @@ private:
         for (auto p = buf; p != buf + nr; ++p) {
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
+            if (completion->is_uring_buf_ring_completion()) {
+                // Set it's buffer from the buf group.
+            }
             completion->complete_with(cqe->res);
         }
     }

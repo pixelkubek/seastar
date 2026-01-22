@@ -1225,6 +1225,12 @@ prepare_sqe(io_uring_sqe* sqe, const internal::io_request& req, io_completion* c
             ::io_uring_prep_read(sqe, op.fd, op.addr, op.size, op.pos);
             break;
         }
+        case o::uring_buf_group_read: {
+            const auto& op = req.as<io_request::operation::uring_buf_group_read>();
+            ::io_uring_prep_read(sqe, op.fd, nullptr, op.size, op.pos);
+            sqe->buf_group = op.buf_group;
+            break;
+        }
         case o::write: {
             const auto& op = req.as<io_request::operation::write>();
             ::io_uring_prep_write(sqe, op.fd, op.addr, op.size, op.pos);
@@ -1248,6 +1254,12 @@ prepare_sqe(io_uring_sqe* sqe, const internal::io_request& req, io_completion* c
         case o::recv: {
             const auto& op = req.as<io_request::operation::recv>();
             ::io_uring_prep_recv(sqe, op.fd, op.addr, op.size, op.flags);
+            break;
+        }
+        case o::uring_buf_group_recv: {
+            const auto& op = req.as<io_request::operation::uring_buf_group_recv>();
+            ::io_uring_prep_recv(sqe, op.fd, nullptr, op.size, op.flags);
+            sqe->buf_group = op.buf_group;
             break;
         }
         case o::recvmsg: {

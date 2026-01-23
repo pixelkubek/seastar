@@ -18,6 +18,7 @@
 /*
  * Copyright 2019 ScyllaDB
  */
+#include <liburing/io_uring.h>
 #ifdef SEASTAR_MODULE
 module;
 #endif
@@ -2144,6 +2145,56 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
     hrtimer_completion _hrtimer_completion;
     smp_wakeup_completion _smp_wakeup_completion;
+    class ring_buffer_provider_impl {
+        ::io_uring_buf_ring _buffer_ring;
+        size_t _reserved_buffer_count;
+
+    public:
+        // TODO add constructor and destructor.
+
+        void reserve() {
+            _reserved_buffer_count++;
+        }
+
+        bool has_unreserved_buffer() const; // TODO
+
+        struct buffer {
+            char* ptr;
+            size_t len;
+        };
+
+        buffer get_buf(size_t id); // TODO
+        void return_buf(size_t id) {
+            // TODO
+            _reserved_buffer_count--;
+        }
+    };
+
+    class ring_buffer_provider {
+        lw_shared_ptr<ring_buffer_provider_impl> _impl;
+
+    public:
+        ring_buffer_provider()
+            : _impl(seastar::make_lw_shared<ring_buffer_provider_impl>()) {
+        }
+
+        void reserve() {
+            _impl->reserve();
+        }
+
+        bool has_unreserved_buffer() const {
+            return _impl->has_unreserved_buffer();
+        }
+
+
+        temporary_buffer<char> borrow(size_t id) {
+            auto [ptr, len] = _impl->get_buf(id);
+            // TODO create an object deleter, which holds a copy of the _impl
+            // pointer and returns the buffer upon destruction.
+            return {ptr, len, deleter()};
+        }
+    };
+    ring_buffer_provider _uring_buffer_ring;
 private:
     static file_desc make_timerfd() {
         return file_desc::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK);
@@ -2242,7 +2293,8 @@ public:
             , _hrtimer_timerfd(make_timerfd())
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)
-            , _smp_wakeup_completion(_r._notify_eventfd) {
+            , _smp_wakeup_completion(_r._notify_eventfd)
+            , _uring_buffer_ring() {
         // Protect against spurious wakeups - if we get notified that the timer has
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         auto tfd = _r._task_quota_timer.get();
@@ -2432,6 +2484,11 @@ public:
         return submit_request(std::move(desc), std::move(req));
     }
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        if (_uring_buffer_ring.has_unreserved_buffer()) {
+            _uring_buffer_ring.reserve();
+            // TODO submit a uring_buf_group_read_op with a buf_group_io_completion completion.
+            return make_ready_future<temporary_buffer<char>>();
+        } else {
             class read_completion final : public io_completion {
                 temporary_buffer<char> _buffer;
                 promise<temporary_buffer<char>> _result;
@@ -2460,7 +2517,8 @@ public:
             auto desc = std::make_unique<read_completion>(fd, ba->allocate_buffer());
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, desc->get_write(), desc->get_size(), false);
-            return submit_request(std::move(desc), std::move(req));
+            return submit_request(std::move(desc), std::move(req)); 
+        }
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
@@ -2516,6 +2574,11 @@ public:
 #endif
 
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
+        if (_uring_buffer_ring.has_unreserved_buffer()) {
+            _uring_buffer_ring.reserve();
+            // TODO submit a uring_buf_group_recv_op with a buf_group_io_completion completion.
+            return make_ready_future<temporary_buffer<char>>();
+        } else {
         class recv_completion final : public io_completion {
             temporary_buffer<char> _buffer;
             promise<temporary_buffer<char>> _result;
@@ -2544,6 +2607,7 @@ public:
         auto desc = std::make_unique<recv_completion>(fd, ba->allocate_buffer());
         auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
         return submit_request(std::move(desc), std::move(req));
+        }
     }
 
     virtual bool do_blocking_io() const override {

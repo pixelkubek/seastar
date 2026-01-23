@@ -2064,9 +2064,6 @@ public:
     void set_buffer(temporary_buffer<char> buffer) noexcept {
         _buffer_opt.emplace(std::move(buffer));
     }
-    bool is_uring_buf_ring_completion() noexcept override {
-        return true;
-    }
 };
 } // namespace uring
 
@@ -2255,8 +2252,8 @@ private:
         for (auto p = buf; p != buf + nr; ++p) {
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
-            if (completion->is_uring_buf_ring_completion()) {
-                // TODO dynamic case and set it's buffer from the buf group.
+            if (auto* buf_ring_completion = dynamic_cast<uring::buf_group_io_completion*>(completion); buf_ring_completion) {
+                // TODO set it's buffer from the buf group.
             }
             completion->complete_with(cqe->res);
         }

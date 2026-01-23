@@ -2045,14 +2045,14 @@ class buf_group_io_completion final: public io_completion {
     promise<temporary_buffer<char>> _result;
 public:
     buf_group_io_completion(pollable_fd_state& fd) {}
-    void complete(size_t bytes) noexcept final {
+    void complete(size_t bytes) noexcept final { // FIXME check if this is valid, maybe it should complete with an empty temporary_buffer.
         try {
             _buffer_opt.value().trim(bytes);
             _result.set_value(std::move(_buffer_opt.value()));
+            delete this;
         } catch (...) {
             set_exception(std::current_exception());
         }
-        delete this;
     }
     void set_exception(std::exception_ptr eptr) noexcept final {
         _result.set_exception(eptr);

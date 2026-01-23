@@ -2256,7 +2256,7 @@ private:
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
             if (completion->is_uring_buf_ring_completion()) {
-                // Set it's buffer from the buf group.
+                // TODO dynamic case and set it's buffer from the buf group.
             }
             completion->complete_with(cqe->res);
         }

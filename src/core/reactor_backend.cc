@@ -2153,14 +2153,19 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             _reserved_buffer_count++;
         }
 
-        bool has_unreserved_buffer() const; // TODO
+        bool has_unreserved_buffer() const {
+            return false; // TODO
+        }
 
         struct buffer {
             char* ptr;
             size_t len;
         };
 
-        buffer get_buf(size_t id); // TODO
+        buffer get_buf(size_t id) {
+            // TODO
+            return {};
+        } 
         void return_buf(size_t id) {
             // TODO
             _reserved_buffer_count--;

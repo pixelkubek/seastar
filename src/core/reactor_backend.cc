@@ -2362,6 +2362,9 @@ private:
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
             if (auto* buf_ring_completion = dynamic_cast<uring::buf_group_io_completion*>(completion); buf_ring_completion) {
+                // By reserving ring buffers, the backend should never submit 
+                // a ring buffer SQE if there might not be enough buffers.
+                SEASTAR_ASSERT(cqe->res != -ENOBUFS);
                 const uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
                 buf_ring_completion->set_buffer(_uring_buffer_ring.borrow(bid));
 

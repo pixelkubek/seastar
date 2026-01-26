@@ -2156,8 +2156,8 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         };
 
         static constexpr uint16_t s_buffer_group_id = 0;
-        static constexpr unsigned s_ring_entries = 256;
-        static constexpr size_t s_buffer_size = 8192;
+        static constexpr unsigned s_ring_entries = 24;
+        static constexpr size_t s_buffer_size = 1<<17;
 
         ::io_uring* _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;

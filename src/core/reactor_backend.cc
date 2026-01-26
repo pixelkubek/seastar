@@ -2185,9 +2185,30 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         std::vector<buffer> _buffers;
         size_t _reserved_buffer_count = 0;
         int _mask = 0;
-        bool _enabled = false;
 
-        void disable(const char* reason, int err = 0) noexcept {
+    public:
+        explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring)
+            : _uring(std::move(ring)) {
+            int err = 0;
+            _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
+            if (err) {
+                throw std::system_error(-err, std::generic_category());
+            }
+
+            _mask = ::io_uring_buf_ring_mask(s_ring_entries);
+            _buffers.reserve(s_ring_entries);
+            for (unsigned i = 0; i < s_ring_entries; ++i) {
+                void *ptr;
+                if (int err = posix_memalign(&ptr, memory::page_size, s_buffer_size); err) {
+                    throw std::system_error(err, std::generic_category());
+                }
+                _buffers.push_back({static_cast<char*>(ptr), s_buffer_size});
+                ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
+            }
+            ::io_uring_buf_ring_advance(_buffer_ring, s_ring_entries);
+        }
+
+        ~ring_buffer_provider_impl() {
             if (_buffer_ring) {
                 ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
                 _buffer_ring = nullptr;
@@ -2197,73 +2218,22 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             }
             _buffers.clear();
             _reserved_buffer_count = 0;
-            _enabled = false;
-            if (reason) {
-                if (err) {
-                    seastar_logger.warn("io_uring buffer ring disabled: {} (err={})", reason, err);
-                } else {
-                    seastar_logger.warn("io_uring buffer ring disabled: {}", reason);
-                }
-            }
-        }
-
-    public:
-        explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring)
-            : _uring(std::move(ring)) {
-            int err = 0;
-            _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
-            if (!_buffer_ring || err) {
-                disable("setup failed", err);
-                return;
-            }
-
-            _mask = ::io_uring_buf_ring_mask(s_ring_entries);
-            _buffers.reserve(s_ring_entries);
-            for (unsigned i = 0; i < s_ring_entries; ++i) {
-                void *ptr;
-                if (int err = posix_memalign(&ptr, memory::page_size, s_buffer_size); err) {
-                    disable("buffer allocation failed", err);
-                    return;
-                }
-                _buffers.push_back({static_cast<char*>(ptr), s_buffer_size});
-                ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
-            }
-            ::io_uring_buf_ring_advance(_buffer_ring, s_ring_entries);
-            _enabled = true;
-        }
-
-        ~ring_buffer_provider_impl() {
-            if (_enabled) {
-                ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
-            }
-            for (auto& buf : _buffers) {
-                std::free(buf.ptr);
-            }
         }
 
         void reserve() {
-            if (_enabled) {
-                _reserved_buffer_count++;
-            }
+            _reserved_buffer_count++;
         }
 
         bool has_unreserved_buffer() const {
-            if (!_enabled) {
-                return false;
-            }
             return _buffers.size() > _reserved_buffer_count;
         }
 
         buffer get_buf(size_t id) {
-            SEASTAR_ASSERT(_enabled);
             SEASTAR_ASSERT(id < _buffers.size());
             return _buffers[id];
         } 
 
         void return_buf(size_t id) {
-            if (!_enabled) {
-                return;
-            }
             SEASTAR_ASSERT(id < _buffers.size());
             const auto& buf = _buffers[id];
             ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, id, _mask, 0);
@@ -2286,24 +2256,39 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         lw_shared_ptr<ring_buffer_provider_impl> _impl;
 
     public:
-        explicit ring_buffer_provider(lw_shared_ptr<io_uring_holder> ring)
-            : _impl(seastar::make_lw_shared<ring_buffer_provider_impl>(ring)) {
+        explicit ring_buffer_provider(lw_shared_ptr<io_uring_holder> ring) {
+            try {
+                _impl = seastar::make_lw_shared<ring_buffer_provider_impl>(ring);
+            } catch (const std::exception& e) {
+                seastar_logger.warn("Ring buffer creation failed: {}", e);
+            }
         }
 
         void reserve() {
-            _impl->reserve();
+            if (_impl) {
+                _impl->reserve();
+            }
         }
 
         bool has_unreserved_buffer() const {
-            return _impl->has_unreserved_buffer();
+            if (_impl) {
+                return _impl->has_unreserved_buffer();
+            }
+            return false;
         }
 
         size_t buffer_size() const {
-            return _impl->buffer_size();
+            if (_impl) {
+                return _impl->buffer_size();
+            }
+            return 0;
         }
 
         uint16_t buf_group() const {
-            return _impl->buf_group();
+            if (_impl) {
+                return _impl->buf_group();
+            }
+            return 0;
         }
 
 

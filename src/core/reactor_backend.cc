@@ -2077,7 +2077,28 @@ public:
 
 class reactor_backend_asymmetric_uring final : public reactor_backend {
     reactor& _r;
-    ::io_uring _uring;
+
+    class io_uring_holder {
+        ::io_uring _uring;
+    public:
+        explicit io_uring_holder(std::variant<std::monostate, int, std::any>& io_uring_init) 
+        : _uring(uring::try_create_asymmetric_uring(io_uring_init, true).value()) {
+        }
+
+        const ::io_uring* get_ptr() const {
+            return &_uring;
+        }
+
+        ::io_uring* get_ptr() {
+            return &_uring;
+        }
+
+        ~io_uring_holder() {
+            ::io_uring_queue_exit(&_uring);
+        }
+    };
+    seastar::lw_shared_ptr<io_uring_holder> _uring;
+
     bool _did_work_while_getting_sqe = false;
     bool _has_pending_submissions = false;
     file_desc _hrtimer_timerfd;
@@ -2159,7 +2180,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         static constexpr unsigned s_ring_entries = 24;
         static constexpr size_t s_buffer_size = 1<<17;
 
-        ::io_uring* _uring;
+        lw_shared_ptr<io_uring_holder> _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
         std::vector<buffer> _buffers;
         size_t _reserved_buffer_count = 0;
@@ -2168,7 +2189,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
         void disable(const char* reason, int err = 0) noexcept {
             if (_buffer_ring) {
-                ::io_uring_free_buf_ring(_uring, _buffer_ring, s_ring_entries, s_buffer_group_id);
+                ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
                 _buffer_ring = nullptr;
             }
             for (auto& buf : _buffers) {
@@ -2187,10 +2208,10 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         }
 
     public:
-        explicit ring_buffer_provider_impl(::io_uring& ring)
-            : _uring(&ring) {
+        explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring)
+            : _uring(std::move(ring)) {
             int err = 0;
-            _buffer_ring = ::io_uring_setup_buf_ring(_uring, s_ring_entries, s_buffer_group_id, 0, &err);
+            _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
             if (!_buffer_ring || err) {
                 disable("setup failed", err);
                 return;
@@ -2213,7 +2234,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
         ~ring_buffer_provider_impl() {
             if (_enabled) {
-                ::io_uring_free_buf_ring(_uring, _buffer_ring, s_ring_entries, s_buffer_group_id);
+                ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
             }
             for (auto& buf : _buffers) {
                 std::free(buf.ptr);
@@ -2265,7 +2286,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         lw_shared_ptr<ring_buffer_provider_impl> _impl;
 
     public:
-        explicit ring_buffer_provider(::io_uring& ring)
+        explicit ring_buffer_provider(lw_shared_ptr<io_uring_holder> ring)
             : _impl(seastar::make_lw_shared<ring_buffer_provider_impl>(ring)) {
         }
 
@@ -2302,14 +2323,14 @@ private:
 
     // Can fail if the completion queue is full
     ::io_uring_sqe* try_get_sqe() {
-        return ::io_uring_get_sqe(&_uring);
+        return ::io_uring_get_sqe(_uring->get_ptr());
     }
 
     bool do_flush_submission_ring() {
         if (_has_pending_submissions) {
             _has_pending_submissions = false;
             _did_work_while_getting_sqe = false;
-            io_uring_submit(&_uring);
+            io_uring_submit(_uring->get_ptr());
             return true;
         } else {
             return std::exchange(_did_work_while_getting_sqe, false);
@@ -2367,9 +2388,9 @@ private:
     // Returns true if completions were processed
     bool do_process_kernel_completions_step() {
         struct ::io_uring_cqe* buf[uring::QUEUE_LEN];
-        auto n = ::io_uring_peek_batch_cqe(&_uring, buf, uring::QUEUE_LEN);
+        auto n = ::io_uring_peek_batch_cqe(_uring->get_ptr(), buf, uring::QUEUE_LEN);
         do_process_ready_kernel_completions(buf, n);
-        ::io_uring_cq_advance(&_uring, n);
+        ::io_uring_cq_advance(_uring->get_ptr(), n);
         return n != 0;
     }
 
@@ -2391,7 +2412,7 @@ private:
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)
             : _r(r)
-            , _uring(uring::try_create_asymmetric_uring(r._cfg.asymmetric_uring, true).value())
+            , _uring(make_lw_shared<io_uring_holder>(r._cfg.asymmetric_uring))
             , _hrtimer_timerfd(make_timerfd())
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)
@@ -2402,9 +2423,6 @@ public:
         auto tfd = _r._task_quota_timer.get();
         ::fcntl(tfd, F_SETFL, ::fcntl(tfd, F_GETFL) | O_NONBLOCK);
     }
-    ~reactor_backend_asymmetric_uring() {
-        ::io_uring_queue_exit(&_uring);
-    }
     virtual bool reap_kernel_completions() override {
         return do_process_kernel_completions();
     }
@@ -2412,7 +2430,7 @@ public:
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= queue_pending_file_io();
-        did_work |= ::io_uring_submit(&_uring);
+        did_work |= ::io_uring_submit(_uring->get_ptr());
         return did_work;
     }
     virtual bool kernel_events_can_sleep() const override {
@@ -2422,7 +2440,7 @@ public:
     virtual void wait_and_process_events(const sigset_t* active_sigmask) override {
         _smp_wakeup_completion.maybe_rearm(*this);
         _hrtimer_completion.maybe_rearm(*this);
-        ::io_uring_submit(&_uring);
+        ::io_uring_submit(_uring->get_ptr());
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= std::exchange(_did_work_while_getting_sqe, false);
@@ -2432,7 +2450,7 @@ public:
         struct ::io_uring_cqe* cqe = nullptr;
         sigset_t sigs = *active_sigmask; // io_uring_wait_cqes() wants non-const
         const auto before_wait_cqes = sched_clock::now();
-        auto r = ::io_uring_wait_cqes(&_uring, &cqe, 1, nullptr, &sigs);
+        auto r = ::io_uring_wait_cqes(_uring->get_ptr(), &cqe, 1, nullptr, &sigs);
         _r._total_sleep += sched_clock::now() - before_wait_cqes;
         if (__builtin_expect(r < 0, false)) {
             switch (-r) {

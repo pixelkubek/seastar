@@ -159,7 +159,7 @@ public:
     static io_request make_uring_buf_group_read(int fd, uint64_t pos, size_t size, uint16_t buf_group)  {
         io_request req;
         req._uring_buf_group_read = {
-          .op = operation::read,
+          .op = operation::uring_buf_group_read,
           .fd = fd,
           .pos = pos,
           .size = size,

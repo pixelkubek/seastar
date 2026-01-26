@@ -25,6 +25,7 @@ module;
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <thread>
 #include <utility>
@@ -1230,6 +1231,7 @@ prepare_sqe(io_uring_sqe* sqe, const internal::io_request& req, io_completion* c
         case o::uring_buf_group_read: {
             const auto& op = req.as<io_request::operation::uring_buf_group_read>();
             ::io_uring_prep_read(sqe, op.fd, nullptr, op.size, op.pos);
+            sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = op.buf_group;
             break;
         }
@@ -1261,6 +1263,7 @@ prepare_sqe(io_uring_sqe* sqe, const internal::io_request& req, io_completion* c
         case o::uring_buf_group_recv: {
             const auto& op = req.as<io_request::operation::uring_buf_group_recv>();
             ::io_uring_prep_recv(sqe, op.fd, nullptr, op.size, op.flags);
+            sqe->flags |= IOSQE_BUFFER_SELECT;
             sqe->buf_group = op.buf_group;
             break;
         }
@@ -2045,10 +2048,14 @@ class buf_group_io_completion final: public io_completion {
     promise<temporary_buffer<char>> _result;
 public:
     buf_group_io_completion(pollable_fd_state& fd) {}
-    void complete(size_t bytes) noexcept final { // FIXME check if this is valid, maybe it should complete with an empty temporary_buffer.
+    void complete(size_t bytes) noexcept final {
         try {
-            _buffer_opt.value().trim(bytes);
-            _result.set_value(std::move(_buffer_opt.value()));
+            if (!_buffer_opt) {
+                _result.set_value(temporary_buffer<char>());
+            } else {
+                _buffer_opt->trim(bytes);
+                _result.set_value(std::move(*_buffer_opt));
+            }
             delete this;
         } catch (...) {
             set_exception(std::current_exception());
@@ -2143,32 +2150,124 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
     hrtimer_completion _hrtimer_completion;
     smp_wakeup_completion _smp_wakeup_completion;
     class ring_buffer_provider_impl {
-        ::io_uring_buf_ring _buffer_ring;
-        size_t _reserved_buffer_count;
-
-    public:
-        // TODO add constructor and destructor.
-
-        void reserve() {
-            _reserved_buffer_count++;
-        }
-
-        bool has_unreserved_buffer() const {
-            return false; // TODO
-        }
-
         struct buffer {
             char* ptr;
             size_t len;
         };
 
+        static constexpr uint16_t s_buffer_group_id = 0;
+        static constexpr unsigned s_ring_entries = 256;
+        static constexpr size_t s_buffer_size = 8192;
+
+        ::io_uring* _uring;
+        ::io_uring_buf_ring* _buffer_ring = nullptr;
+        std::vector<buffer> _buffers;
+        size_t _reserved_buffer_count = 0;
+        int _mask = 0;
+        bool _enabled = false;
+
+        void disable(const char* reason, int err = 0) noexcept {
+            if (_buffer_ring) {
+                ::io_uring_free_buf_ring(_uring, _buffer_ring, s_ring_entries, s_buffer_group_id);
+                _buffer_ring = nullptr;
+            }
+            for (auto& buf : _buffers) {
+                std::free(buf.ptr);
+            }
+            _buffers.clear();
+            _reserved_buffer_count = 0;
+            _enabled = false;
+            if (reason) {
+                if (err) {
+                    seastar_logger.warn("io_uring buffer ring disabled: {} (err={})", reason, err);
+                } else {
+                    seastar_logger.warn("io_uring buffer ring disabled: {}", reason);
+                }
+            }
+        }
+
+    public:
+        explicit ring_buffer_provider_impl(::io_uring& ring)
+            : _uring(&ring) {
+            int err = 0;
+            _buffer_ring = ::io_uring_setup_buf_ring(_uring, s_ring_entries, s_buffer_group_id, 0, &err);
+            if (!_buffer_ring || err) {
+                disable("setup failed", err);
+                return;
+            }
+
+            _mask = ::io_uring_buf_ring_mask(s_ring_entries);
+            ::io_uring_buf_ring_init(_buffer_ring);
+            _buffers.reserve(s_ring_entries);
+            for (unsigned i = 0; i < s_ring_entries; ++i) {
+                auto* ptr = static_cast<char*>(std::malloc(s_buffer_size));
+                if (!ptr) {
+                    disable("buffer allocation failed");
+                    return;
+                }
+                _buffers.push_back({ptr, s_buffer_size});
+                ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
+            }
+            ::io_uring_buf_ring_advance(_buffer_ring, s_ring_entries);
+            _enabled = true;
+        }
+
+        ~ring_buffer_provider_impl() {
+            if (_enabled) {
+                ::io_uring_free_buf_ring(_uring, _buffer_ring, s_ring_entries, s_buffer_group_id);
+            }
+            for (auto& buf : _buffers) {
+                std::free(buf.ptr);
+            }
+        }
+
+        void reserve() {
+            if (_enabled) {
+                _reserved_buffer_count++;
+            }
+        }
+
+        bool has_unreserved_buffer() const {
+            if (!_enabled) {
+                return false;
+            }
+            const int available = ::io_uring_buf_ring_available(_uring, _buffer_ring, s_buffer_group_id);
+            if (available <= 0) {
+                return false;
+            }
+            return static_cast<size_t>(available) > _reserved_buffer_count;
+        }
+
         buffer get_buf(size_t id) {
-            // TODO
-            return {};
+            SEASTAR_ASSERT(_enabled);
+            SEASTAR_ASSERT(id < _buffers.size());
+            return _buffers[id];
         } 
         void return_buf(size_t id) {
-            // TODO
-            _reserved_buffer_count--;
+            if (!_enabled) {
+                return;
+            }
+            SEASTAR_ASSERT(id < _buffers.size());
+            const auto& buf = _buffers[id];
+            ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, id, _mask, 0);
+            ::io_uring_buf_ring_advance(_buffer_ring, 1);
+            if (_reserved_buffer_count) {
+                _reserved_buffer_count--;
+            }
+        }
+
+        void release_reservation() {
+            if (_reserved_buffer_count) {
+                _reserved_buffer_count--;
+            }
+        }
+
+        size_t buffer_size() const noexcept {
+            return s_buffer_size;
+        }
+
+        uint16_t buf_group() const noexcept {
+            return s_buffer_group_id;
         }
     };
 
@@ -2176,8 +2275,8 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         lw_shared_ptr<ring_buffer_provider_impl> _impl;
 
     public:
-        ring_buffer_provider()
-            : _impl(seastar::make_lw_shared<ring_buffer_provider_impl>()) {
+        explicit ring_buffer_provider(::io_uring& ring)
+            : _impl(seastar::make_lw_shared<ring_buffer_provider_impl>(ring)) {
         }
 
         void reserve() {
@@ -2188,12 +2287,25 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             return _impl->has_unreserved_buffer();
         }
 
+        void release_reservation() {
+            _impl->release_reservation();
+        }
+
+        size_t buffer_size() const {
+            return _impl->buffer_size();
+        }
+
+        uint16_t buf_group() const {
+            return _impl->buf_group();
+        }
+
 
         temporary_buffer<char> borrow(size_t id) {
             auto [ptr, len] = _impl->get_buf(id);
-            // TODO create an object deleter, which holds a copy of the _impl
-            // pointer and returns the buffer upon destruction.
-            return {ptr, len, deleter()};
+            auto d = make_deleter([impl = _impl, id] {
+                impl->return_buf(id);
+            });
+            return {ptr, len, std::move(d)};
         }
     };
     ring_buffer_provider _uring_buffer_ring;
@@ -2258,7 +2370,13 @@ private:
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
             if (auto* buf_ring_completion = dynamic_cast<uring::buf_group_io_completion*>(completion); buf_ring_completion) {
-                // TODO set it's buffer from the buf group.
+                if (cqe->flags & IORING_CQE_F_BUFFER) {
+                    const uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+                    buf_ring_completion->set_buffer(_uring_buffer_ring.borrow(bid));
+                } else {
+                    _uring_buffer_ring.release_reservation();
+                    buf_ring_completion->set_buffer(temporary_buffer<char>());
+                }
             }
             completion->complete_with(cqe->res);
         }
@@ -2296,7 +2414,7 @@ public:
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)
             , _smp_wakeup_completion(_r._notify_eventfd)
-            , _uring_buffer_ring() {
+            , _uring_buffer_ring(_uring) {
         // Protect against spurious wakeups - if we get notified that the timer has
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         auto tfd = _r._task_quota_timer.get();
@@ -2488,8 +2606,10 @@ public:
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
         if (_uring_buffer_ring.has_unreserved_buffer()) {
             _uring_buffer_ring.reserve();
-            // TODO submit a uring_buf_group_read_op with a buf_group_io_completion completion.
-            return make_ready_future<temporary_buffer<char>>();
+            auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
+            const uint64_t position_file_offset = -1;
+            auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size(), _uring_buffer_ring.buf_group());
+            return submit_request(std::move(desc), std::move(req));
         } else {
             class read_completion final : public io_completion {
                 temporary_buffer<char> _buffer;
@@ -2578,8 +2698,9 @@ public:
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
         if (_uring_buffer_ring.has_unreserved_buffer()) {
             _uring_buffer_ring.reserve();
-            // TODO submit a uring_buf_group_recv_op with a buf_group_io_completion completion.
-            return make_ready_future<temporary_buffer<char>>();
+            auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
+            auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size(), 0, _uring_buffer_ring.buf_group());
+            return submit_request(std::move(desc), std::move(req));
         } else {
         class recv_completion final : public io_completion {
             temporary_buffer<char> _buffer;

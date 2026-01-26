@@ -2184,18 +2184,18 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         ::io_uring_buf_ring* _buffer_ring = nullptr;
         std::vector<buffer> _buffers;
         size_t _reserved_buffer_count = 0;
-        int _mask = 0;
+        const int _mask = 0;
 
     public:
         explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring)
-            : _uring(std::move(ring)) {
+            : _uring(std::move(ring))
+            , _mask(::io_uring_buf_ring_mask(s_ring_entries)) {
             int err = 0;
             _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
             if (err) {
                 throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
             }
 
-            _mask = ::io_uring_buf_ring_mask(s_ring_entries);
             _buffers.reserve(s_ring_entries);
             for (unsigned i = 0; i < s_ring_entries; ++i) {
                 void *ptr;

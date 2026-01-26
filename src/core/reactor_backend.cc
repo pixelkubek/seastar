@@ -2192,7 +2192,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             int err = 0;
             _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
             if (err) {
-                throw std::system_error(-err, std::generic_category());
+                throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
             }
 
             _mask = ::io_uring_buf_ring_mask(s_ring_entries);
@@ -2200,7 +2200,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             for (unsigned i = 0; i < s_ring_entries; ++i) {
                 void *ptr;
                 if (int err = posix_memalign(&ptr, memory::page_size, s_buffer_size); err) {
-                    throw std::system_error(err, std::generic_category());
+                    throw std::system_error(err, std::generic_category(), "posix_memalign");
                 }
                 _buffers.push_back({static_cast<char*>(ptr), s_buffer_size});
                 ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
@@ -2260,7 +2260,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             try {
                 _impl = seastar::make_lw_shared<ring_buffer_provider_impl>(ring);
             } catch (const std::exception& e) {
-                seastar_logger.warn("Ring buffer creation failed: {}", e);
+                seastar_logger.warn("io_uring buffer ring disabled: {}", e);
             }
         }
 

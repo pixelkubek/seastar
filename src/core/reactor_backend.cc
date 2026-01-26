@@ -2230,11 +2230,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             if (!_enabled) {
                 return false;
             }
-            const int available = ::io_uring_buf_ring_available(_uring, _buffer_ring, s_buffer_group_id);
-            if (available <= 0) {
-                return false;
-            }
-            return static_cast<size_t>(available) > _reserved_buffer_count;
+            return _buffers.size() > _reserved_buffer_count;
         }
 
         buffer get_buf(size_t id) {

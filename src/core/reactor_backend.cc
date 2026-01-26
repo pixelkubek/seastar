@@ -2210,7 +2210,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
         ~ring_buffer_provider_impl() {
             if (_buffer_ring) {
-                ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
+                (void)::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
                 _buffer_ring = nullptr;
             }
             for (auto& buf : _buffers) {

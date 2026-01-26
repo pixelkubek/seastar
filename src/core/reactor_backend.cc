@@ -2242,6 +2242,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             SEASTAR_ASSERT(id < _buffers.size());
             return _buffers[id];
         } 
+
         void return_buf(size_t id) {
             if (!_enabled) {
                 return;
@@ -2250,12 +2251,6 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             const auto& buf = _buffers[id];
             ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, id, _mask, 0);
             ::io_uring_buf_ring_advance(_buffer_ring, 1);
-            if (_reserved_buffer_count) {
-                _reserved_buffer_count--;
-            }
-        }
-
-        void release_reservation() {
             if (_reserved_buffer_count) {
                 _reserved_buffer_count--;
             }
@@ -2284,10 +2279,6 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
         bool has_unreserved_buffer() const {
             return _impl->has_unreserved_buffer();
-        }
-
-        void release_reservation() {
-            _impl->release_reservation();
         }
 
         size_t buffer_size() const {
@@ -2369,13 +2360,9 @@ private:
             auto cqe = *p;
             auto completion = reinterpret_cast<kernel_completion*>(cqe->user_data);
             if (auto* buf_ring_completion = dynamic_cast<uring::buf_group_io_completion*>(completion); buf_ring_completion) {
-                if (cqe->flags & IORING_CQE_F_BUFFER) {
-                    const uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-                    buf_ring_completion->set_buffer(_uring_buffer_ring.borrow(bid));
-                } else {
-                    _uring_buffer_ring.release_reservation();
-                    buf_ring_completion->set_buffer(temporary_buffer<char>());
-                }
+                const uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+                buf_ring_completion->set_buffer(_uring_buffer_ring.borrow(bid));
+
             }
             completion->complete_with(cqe->res);
         }

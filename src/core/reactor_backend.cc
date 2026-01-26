@@ -2199,12 +2199,12 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             _mask = ::io_uring_buf_ring_mask(s_ring_entries);
             _buffers.reserve(s_ring_entries);
             for (unsigned i = 0; i < s_ring_entries; ++i) {
-                auto* ptr = static_cast<char*>(std::malloc(s_buffer_size));
-                if (!ptr) {
-                    disable("buffer allocation failed");
+                void *ptr;
+                if (int err = posix_memalign(&ptr, memory::page_size, s_buffer_size); err) {
+                    disable("buffer allocation failed", err);
                     return;
                 }
-                _buffers.push_back({ptr, s_buffer_size});
+                _buffers.push_back({static_cast<char*>(ptr), s_buffer_size});
                 ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
             }
             ::io_uring_buf_ring_advance(_buffer_ring, s_ring_entries);

@@ -2220,12 +2220,16 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             _reserved_buffer_count = 0;
         }
 
-        void reserve() {
-            _reserved_buffer_count++;
-        }
-
         bool has_unreserved_buffer() const {
             return _buffers.size() > _reserved_buffer_count;
+        }
+
+        bool reserve() {
+            if (has_unreserved_buffer()) {
+                _reserved_buffer_count++;
+                return true;
+            }
+            return false;
         }
 
         buffer get_buf(size_t id) {
@@ -2264,15 +2268,9 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             }
         }
 
-        void reserve() {
+        bool reserve() {
             if (_impl) {
-                _impl->reserve();
-            }
-        }
-
-        bool has_unreserved_buffer() const {
-            if (_impl) {
-                return _impl->has_unreserved_buffer();
+                return _impl->reserve();
             }
             return false;
         }
@@ -2592,8 +2590,7 @@ public:
         return submit_request(std::move(desc), std::move(req));
     }
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
-        if (_uring_buffer_ring.has_unreserved_buffer()) {
-            _uring_buffer_ring.reserve();
+        if (_uring_buffer_ring.reserve()) {
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size(), _uring_buffer_ring.buf_group());
@@ -2684,8 +2681,7 @@ public:
 #endif
 
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override {
-        if (_uring_buffer_ring.has_unreserved_buffer()) {
-            _uring_buffer_ring.reserve();
+        if (_uring_buffer_ring.reserve()) {
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size(), 0, _uring_buffer_ring.buf_group());
             return submit_request(std::move(desc), std::move(req));

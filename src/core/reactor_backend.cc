@@ -2197,7 +2197,6 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
             }
 
             _mask = ::io_uring_buf_ring_mask(s_ring_entries);
-            ::io_uring_buf_ring_init(_buffer_ring);
             _buffers.reserve(s_ring_entries);
             for (unsigned i = 0; i < s_ring_entries; ++i) {
                 auto* ptr = static_cast<char*>(std::malloc(s_buffer_size));

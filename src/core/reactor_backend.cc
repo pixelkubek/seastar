@@ -2364,7 +2364,6 @@ private:
                 SEASTAR_ASSERT(cqe->res != -ENOBUFS);
                 const uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
                 buf_ring_completion->set_buffer(_uring_buffer_ring.borrow(bid));
-
             }
             completion->complete_with(cqe->res);
         }

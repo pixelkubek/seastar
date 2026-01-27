@@ -2050,12 +2050,8 @@ public:
     buf_group_io_completion(pollable_fd_state& fd) {}
     void complete(size_t bytes) noexcept final {
         try {
-            if (!_buffer_opt) {
-                _result.set_value(temporary_buffer<char>());
-            } else {
-                _buffer_opt->trim(bytes);
-                _result.set_value(std::move(*_buffer_opt));
-            }
+            _buffer_opt->trim(bytes);
+            _result.set_value(std::move(*_buffer_opt));
             delete this;
         } catch (...) {
             set_exception(std::current_exception());

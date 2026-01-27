@@ -2594,7 +2594,7 @@ public:
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size(), _uring_buffer_ring.buf_group());
             return submit_request(std::move(desc), std::move(req));
-        } else {
+        }
             class read_completion final : public io_completion {
                 temporary_buffer<char> _buffer;
                 promise<temporary_buffer<char>> _result;
@@ -2624,7 +2624,6 @@ public:
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, desc->get_write(), desc->get_size(), false);
             return submit_request(std::move(desc), std::move(req)); 
-        }
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
@@ -2684,7 +2683,7 @@ public:
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size(), 0, _uring_buffer_ring.buf_group());
             return submit_request(std::move(desc), std::move(req));
-        } else {
+        }
         class recv_completion final : public io_completion {
             temporary_buffer<char> _buffer;
             promise<temporary_buffer<char>> _result;
@@ -2713,7 +2712,6 @@ public:
         auto desc = std::make_unique<recv_completion>(fd, ba->allocate_buffer());
         auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
         return submit_request(std::move(desc), std::move(req));
-        }
     }
 
     virtual bool do_blocking_io() const override {

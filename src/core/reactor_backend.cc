@@ -18,7 +18,6 @@
 /*
  * Copyright 2019 ScyllaDB
  */
-#include <liburing/io_uring.h>
 #ifdef SEASTAR_MODULE
 module;
 #endif
@@ -42,6 +41,7 @@ module;
 
 #ifdef SEASTAR_HAVE_URING
 #include <liburing.h>
+#include <liburing/io_uring.h>
 #endif
 
 #ifdef SEASTAR_MODULE

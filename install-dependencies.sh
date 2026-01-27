@@ -58,6 +58,8 @@ debian_packages=(
     python3
     python3-pyelftools
     python3-yaml
+    python3-lark
+    python3-pytest
     ragel
     stow
     systemtap-sdt-dev
@@ -103,6 +105,7 @@ redhat_packages=(
     python3
     python3-pyelftools
     python3-pyyaml
+    python3-pytest
     stow
     systemtap-sdt-devel
     valgrind-devel
@@ -231,6 +234,8 @@ opensuse_packages=(
     openssl
     protobuf-devel
     python3-PyYAML
+    python3-lark-parser
+    python3-pytest
     ragel
     stow
     xfsprogs-devel

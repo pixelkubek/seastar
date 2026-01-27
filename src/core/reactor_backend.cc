@@ -2210,7 +2210,10 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
 
         ~ring_buffer_provider_impl() {
             if (_buffer_ring) {
-                (void)::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
+                int ret = ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
+                if (ret != 0) {
+                    seastar_logger.warn("freeing io_uring buffer ring failed: {}", std::system_error(-ret, std::generic_category(), "io_uring_free_buf_ring"));
+                }
                 _buffer_ring = nullptr;
             }
             for (auto& buf : _buffers) {

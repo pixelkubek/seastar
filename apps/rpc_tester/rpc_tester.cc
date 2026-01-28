@@ -41,6 +41,7 @@
 #include <seastar/core/thread.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/with_scheduling_group.hh>
+#include <seastar/coroutine/as_future.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/rpc/rpc.hh>
 #include <seastar/util/assert.hh>
@@ -531,14 +532,11 @@ private:
             error = std::current_exception();
         }
 
-        try {
-            co_await sink.flush();
-        } catch (...) {
+        auto flush_future = co_await coroutine::as_future(sink.flush());
+        if (flush_future.failed() && !error) [[unlikely]] {
+            error = flush_future.get_exception();
         }
-        try {
-            co_await sink.close();
-        } catch (...) {
-        }
+        co_await sink.close();
 
         if (error) {
             std::rethrow_exception(error);
@@ -632,14 +630,11 @@ public:
             error = std::current_exception();
         }
 
-        try {
-            co_await sink.flush();
-        } catch (...) {
+        auto flush_future = co_await coroutine::as_future(sink.flush());
+        if (flush_future.failed() && !error) [[unlikely]] {
+            error = flush_future.get_exception();
         }
-        try {
-            co_await sink.close();
-        } catch (...) {
-        }
+        co_await sink.close();
 
         if (error) {
             std::rethrow_exception(error);
@@ -672,14 +667,11 @@ public:
             error = std::current_exception();
         }
 
-        try {
-            co_await sink.flush();
-        } catch (...) {
+        auto flush_future = co_await coroutine::as_future(sink.flush());
+        if (flush_future.failed() && !error) [[unlikely]] {
+            error = flush_future.get_exception();
         }
-        try {
-            co_await sink.close();
-        } catch (...) {
-        }
+        co_await sink.close();
 
         if (error) {
             std::rethrow_exception(error);

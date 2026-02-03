@@ -391,6 +391,9 @@ bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_
 
 unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;
 
+// QUEUE_LEN is more or less arbitrary. Too low and we'll be
+// issuing too small batches, too high and we require too much locked
+// memory, but otherwise it doesn't matter.
 inline constexpr unsigned QUEUE_LEN = 200;
 inline constexpr std::chrono::milliseconds POLLER_SLEEP_TIMEOUT(2000);
 

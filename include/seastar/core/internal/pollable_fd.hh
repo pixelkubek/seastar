@@ -92,6 +92,7 @@ public:
 
     friend class reactor;
     friend class pollable_fd;
+    friend class reactor_backend_uring_base;
     friend class reactor_backend_uring;
     friend class reactor_backend_asymmetric_uring;
 

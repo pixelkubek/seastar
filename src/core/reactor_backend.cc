@@ -1307,6 +1307,7 @@ prepare_sqe(io_uring_sqe* sqe, const internal::io_request& req, io_completion* c
 class reactor_backend_uring_base : public reactor_backend {
 protected:
     reactor& _r;
+    ::io_uring _uring;
 
 private:
     bool _did_work_while_getting_sqe = false;
@@ -1387,13 +1388,10 @@ private:
 
     // Can fail if the completion queue is full
     ::io_uring_sqe* try_get_sqe() {
-        return ::io_uring_get_sqe(uring_ptr());
+        return ::io_uring_get_sqe(&_uring);
     }
 
 protected:
-    virtual ::io_uring* uring_ptr() noexcept = 0;
-    virtual const ::io_uring* uring_ptr() const noexcept = 0;
-
     template <typename T>
     class promise_completion_base : public io_completion {
     protected:
@@ -1533,7 +1531,7 @@ protected:
         if (_has_pending_submissions) {
             _has_pending_submissions = false;
             _did_work_while_getting_sqe = false;
-            io_uring_submit(uring_ptr());
+            io_uring_submit(&_uring);
             return true;
         } else {
             return std::exchange(_did_work_while_getting_sqe, false);
@@ -1558,9 +1556,9 @@ protected:
     // Returns true if completions were processed
     bool do_process_kernel_completions_step() {
         struct ::io_uring_cqe* buf[uring::QUEUE_LEN];
-        auto n = ::io_uring_peek_batch_cqe(uring_ptr(), buf, uring::QUEUE_LEN);
+        auto n = ::io_uring_peek_batch_cqe(&_uring, buf, uring::QUEUE_LEN);
         do_process_ready_kernel_completions(buf, n);
-        ::io_uring_cq_advance(uring_ptr(), n);
+        ::io_uring_cq_advance(&_uring, n);
         return n != 0;
     }
 
@@ -1612,8 +1610,9 @@ protected:
         return fut;
     }
 
-    explicit reactor_backend_uring_base(reactor& r)
+    explicit reactor_backend_uring_base(reactor& r, ::io_uring uring)
     : _r(r)
+    , _uring(uring)
     , _hrtimer_timerfd(make_timerfd())
     , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
     , _hrtimer_completion(_r, _hrtimer_timerfd)
@@ -1636,7 +1635,7 @@ public:
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= queue_pending_file_io();
-        did_work |= ::io_uring_submit(uring_ptr());
+        did_work |= ::io_uring_submit(&_uring);
         return did_work;
     }
     
@@ -1648,7 +1647,7 @@ public:
     virtual void wait_and_process_events(const sigset_t* active_sigmask) override {
         _smp_wakeup_completion.maybe_rearm(*this);
         _hrtimer_completion.maybe_rearm(*this);
-        ::io_uring_submit(uring_ptr());
+        ::io_uring_submit(&_uring);
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= std::exchange(_did_work_while_getting_sqe, false);
@@ -1658,7 +1657,7 @@ public:
         struct ::io_uring_cqe* cqe = nullptr;
         sigset_t sigs = *active_sigmask; // io_uring_wait_cqes() wants non-const
         const auto before_wait_cqes = sched_clock::now();
-        auto r = ::io_uring_wait_cqes(uring_ptr(), &cqe, 1, nullptr, &sigs);
+        auto r = ::io_uring_wait_cqes(&_uring, &cqe, 1, nullptr, &sigs);
         _r._total_sleep += sched_clock::now() - before_wait_cqes;
         if (__builtin_expect(r < 0, false)) {
             switch (-r) {
@@ -1731,20 +1730,9 @@ public:
 };
 
 class reactor_backend_uring final : public reactor_backend_uring_base {
-private:
-    ::io_uring _uring;
-
-    protected:
-    ::io_uring* uring_ptr() noexcept override {
-        return &_uring;
-    }
-    const ::io_uring* uring_ptr() const noexcept override {
-        return &_uring;
-    }
 public:
     explicit reactor_backend_uring(reactor& r)
-        : reactor_backend_uring_base(r)
-        , _uring(try_create_uring(uring::QUEUE_LEN, true).value()) {
+        : reactor_backend_uring_base(r, try_create_uring(uring::QUEUE_LEN, true).value()) {
     }
 
     ~reactor_backend_uring() override {
@@ -2142,8 +2130,6 @@ public:
 
 class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
 private:
-    ::io_uring _uring;
-
     class ring_buffer_provider_impl {
         struct buffer {
             char* ptr;
@@ -2278,13 +2264,6 @@ private:
     ring_buffer_provider _uring_buffer_ring;
 
 protected:
-    ::io_uring* uring_ptr() noexcept override {
-        return &_uring;
-    }
-    const ::io_uring* uring_ptr() const noexcept override {
-        return &_uring;
-    }
-
     void handle_ready_kernel_completion(kernel_completion* completion, ::io_uring_cqe* cqe) override {
         if (auto* buf_ring_completion = dynamic_cast<uring::buf_group_io_completion*>(completion); buf_ring_completion) {
             // By reserving ring buffers, the backend should never submit 
@@ -2303,8 +2282,7 @@ protected:
 
 public:
     explicit reactor_backend_asymmetric_uring(reactor& r)
-        : reactor_backend_uring_base(r)
-        , _uring(uring::try_create_asymmetric_uring(r._cfg.asymmetric_uring, true).value())
+        : reactor_backend_uring_base(r, uring::try_create_asymmetric_uring(r._cfg.asymmetric_uring, true).value())
         , _uring_buffer_ring(&_uring) {
     }
 

@@ -1625,8 +1625,6 @@ protected:
 
     
 public:
-    virtual ~reactor_backend_uring_base() = default;
-
     virtual bool reap_kernel_completions() override {
         return do_process_kernel_completions();
     }

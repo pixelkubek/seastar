@@ -1387,12 +1387,12 @@ private:
 
     // Can fail if the completion queue is full
     ::io_uring_sqe* try_get_sqe() {
-        return ::io_uring_get_sqe(uring());
+        return ::io_uring_get_sqe(uring_ptr());
     }
 
 protected:
-    virtual ::io_uring* uring() noexcept = 0;
-    virtual const ::io_uring* uring() const noexcept = 0;
+    virtual ::io_uring* uring_ptr() noexcept = 0;
+    virtual const ::io_uring* uring_ptr() const noexcept = 0;
 
     template <typename T>
     class promise_completion_base : public io_completion {
@@ -1516,7 +1516,7 @@ protected:
         if (_has_pending_submissions) {
             _has_pending_submissions = false;
             _did_work_while_getting_sqe = false;
-            io_uring_submit(uring());
+            io_uring_submit(uring_ptr());
             return true;
         } else {
             return std::exchange(_did_work_while_getting_sqe, false);
@@ -1541,9 +1541,9 @@ protected:
     // Returns true if completions were processed
     bool do_process_kernel_completions_step() {
         struct ::io_uring_cqe* buf[uring::QUEUE_LEN];
-        auto n = ::io_uring_peek_batch_cqe(uring(), buf, uring::QUEUE_LEN);
+        auto n = ::io_uring_peek_batch_cqe(uring_ptr(), buf, uring::QUEUE_LEN);
         do_process_ready_kernel_completions(buf, n);
-        ::io_uring_cq_advance(uring(), n);
+        ::io_uring_cq_advance(uring_ptr(), n);
         return n != 0;
     }
 
@@ -1618,7 +1618,7 @@ public:
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= queue_pending_file_io();
-        did_work |= ::io_uring_submit(uring());
+        did_work |= ::io_uring_submit(uring_ptr());
         return did_work;
     }
     
@@ -1630,7 +1630,7 @@ public:
     virtual void wait_and_process_events(const sigset_t* active_sigmask) override {
         _smp_wakeup_completion.maybe_rearm(*this);
         _hrtimer_completion.maybe_rearm(*this);
-        ::io_uring_submit(uring());
+        ::io_uring_submit(uring_ptr());
         bool did_work = false;
         did_work |= _preempt_io_context.service_preempting_io();
         did_work |= std::exchange(_did_work_while_getting_sqe, false);
@@ -1640,7 +1640,7 @@ public:
         struct ::io_uring_cqe* cqe = nullptr;
         sigset_t sigs = *active_sigmask; // io_uring_wait_cqes() wants non-const
         const auto before_wait_cqes = sched_clock::now();
-        auto r = ::io_uring_wait_cqes(uring(), &cqe, 1, nullptr, &sigs);
+        auto r = ::io_uring_wait_cqes(uring_ptr(), &cqe, 1, nullptr, &sigs);
         _r._total_sleep += sched_clock::now() - before_wait_cqes;
         if (__builtin_expect(r < 0, false)) {
             switch (-r) {
@@ -1717,10 +1717,10 @@ private:
     ::io_uring _uring;
 
     protected:
-    ::io_uring* uring() noexcept override {
+    ::io_uring* uring_ptr() noexcept override {
         return &_uring;
     }
-    const ::io_uring* uring() const noexcept override {
+    const ::io_uring* uring_ptr() const noexcept override {
         return &_uring;
     }
 public:
@@ -2268,10 +2268,10 @@ private:
     ring_buffer_provider _uring_buffer_ring;
 
 protected:
-    ::io_uring* uring() noexcept override {
+    ::io_uring* uring_ptr() noexcept override {
         return &_uring;
     }
-    const ::io_uring* uring() const noexcept override {
+    const ::io_uring* uring_ptr() const noexcept override {
         return &_uring;
     }
 

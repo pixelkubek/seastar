@@ -1409,6 +1409,14 @@ protected:
         }
     };
 
+    class promise_bytes_completion_base : public promise_completion_base<size_t> {
+    public:
+        void complete(size_t bytes) noexcept override {
+            _result.set_value(bytes);
+            delete this;
+        }
+    };
+
     class accept_completion_base : public promise_completion_base<std::tuple<pollable_fd, socket_address>> {
     protected:
         pollable_fd_state& _listenfd;
@@ -1446,6 +1454,10 @@ protected:
     public:
         explicit connect_completion_base(const socket_address& sa)
             : _sa(sa) {}
+        void complete(size_t) noexcept override {
+            _result.set_value();
+            delete this;
+        }
         ::sockaddr* posix_sockaddr() {
             return &_sa.as_posix_sockaddr();
         }
@@ -1454,7 +1466,7 @@ protected:
         }
     };
 
-    class recvmsg_completion_base : public promise_completion_base<size_t> {
+    class recvmsg_completion_base : public promise_bytes_completion_base {
     protected:
         std::vector<iovec> _iov;
         ::msghdr _mh = {};
@@ -1475,6 +1487,11 @@ protected:
     public:
         explicit read_completion_base(temporary_buffer<char> buffer)
             : _buffer(std::move(buffer)) {}
+        void complete(size_t bytes) noexcept override {
+            _buffer.trim(bytes);
+            _result.set_value(std::move(_buffer));
+            delete this;
+        }
         char* get_write() {
             return _buffer.get_write();
         }
@@ -1483,7 +1500,7 @@ protected:
         }
     };
 
-    class sendmsg_completion_base : public promise_completion_base<size_t> {
+    class sendmsg_completion_base : public promise_bytes_completion_base {
     protected:
         ::msghdr _mh = {};
         const size_t _to_write;
@@ -1501,7 +1518,7 @@ protected:
         }
     };
 
-    class send_completion_base : public promise_completion_base<size_t> {
+    class send_completion_base : public promise_bytes_completion_base {
     protected:
         const size_t _to_write;
     public:
@@ -1776,8 +1793,7 @@ public:
                 , _fd(fd) {}
             void complete(size_t fd) noexcept final {
                 _fd.speculate_epoll(POLLOUT);
-                _result.set_value();
-                delete this;
+                connect_completion_base::complete(fd);
             }
         };
         auto desc = std::make_unique<connect_completion>(fd, sa);
@@ -1816,8 +1832,7 @@ public:
                 if (bytes == internal::iovec_len(_iov)) {
                     _fd.speculate_epoll(EPOLLIN);
                 }
-                _result.set_value(bytes);
-                delete this;
+                recvmsg_completion_base::complete(bytes);
             }
         };
         auto desc = std::make_unique<recvmsg_completion>(fd, iov);
@@ -1853,9 +1868,7 @@ public:
                     if (bytes == _buffer.size()) {
                         _fd.speculate_epoll(EPOLLIN);
                     }
-                    _buffer.trim(bytes);
-                    _result.set_value(std::move(_buffer));
-                    delete this;
+                    read_completion_base::complete(bytes);
                 }
             };
             auto desc = std::make_unique<read_some_completion>(fd, ba->allocate_buffer());
@@ -1891,8 +1904,7 @@ public:
                 if (bytes == to_write()) {
                     _fd.speculate_epoll(EPOLLOUT);
                 }
-                _result.set_value(bytes);
-                delete this;
+                sendmsg_completion_base::complete(bytes);
             }
         };
         auto desc = std::make_unique<sendmsg_completion>(fd, iovs, len);
@@ -1925,8 +1937,7 @@ public:
                 if (bytes == to_write()) {
                     _fd.speculate_epoll(EPOLLOUT);
                 }
-                _result.set_value(bytes);
-                delete this;
+                send_completion_base::complete(bytes);
             }
         };
         auto desc = std::make_unique<send_completion>(fd, len);
@@ -1961,9 +1972,7 @@ public:
                 if (bytes == _buffer.size()) {
                     _fd.speculate_epoll(EPOLLIN);
                 }
-                _buffer.trim(bytes);
-                _result.set_value(std::move(_buffer));
-                delete this;
+                read_completion_base::complete(bytes);
             }
         };
         auto desc = std::make_unique<recv_some_completion>(fd, ba->allocate_buffer());
@@ -2312,51 +2321,26 @@ public:
                 delete this;
             }
         };
-            auto desc = std::make_unique<accept_completion>(listenfd);
-            auto req = internal::io_request::make_accept(listenfd.fd.get(), desc->posix_sockaddr(), desc->socklen_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC);
-            return submit_request(std::move(desc), std::move(req));
+        auto desc = std::make_unique<accept_completion>(listenfd);
+        auto req = internal::io_request::make_accept(listenfd.fd.get(), desc->posix_sockaddr(), desc->socklen_ptr(), SOCK_NONBLOCK | SOCK_CLOEXEC);
+        return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override {
-        class connect_completion final : public connect_completion_base {
-        public:
-            connect_completion(const socket_address& sa)
-                : connect_completion_base(sa) {}
-            void complete(size_t) noexcept final {
-                _result.set_value();
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<connect_completion>(sa);
+        auto desc = std::make_unique<connect_completion_base>(sa);
         auto req = internal::io_request::make_connect(fd.fd.get(), desc->posix_sockaddr(), desc->socklen());
         return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {
-        class read_completion final : public promise_completion_base<size_t> {
-        public:
-            void complete(size_t bytes) noexcept final {
-                _result.set_value(bytes);
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<read_completion>();
+        auto desc = std::make_unique<promise_bytes_completion_base>();
         const uint64_t position_file_offset = -1;
         auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, buffer, len, false);
         return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override {
-        class recvmsg_completion final : public recvmsg_completion_base {
-        public:
-            recvmsg_completion(pollable_fd_state& fd, const std::vector<iovec>& iov)
-                : recvmsg_completion_base(iov) {}
-            void complete(size_t bytes) noexcept final {
-                _result.set_value(bytes);
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<recvmsg_completion>(fd, iov);
+        auto desc = std::make_unique<recvmsg_completion_base>(iov);
         auto req = internal::io_request::make_recvmsg(fd.fd.get(), desc->msghdr(), 0);
         return submit_request(std::move(desc), std::move(req));
     }
@@ -2368,49 +2352,21 @@ public:
             auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size(), _uring_buffer_ring.buf_group());
             return submit_request(std::move(desc), std::move(req));
         }
-        class read_some_completion final : public read_completion_base {
-        public:
-            read_some_completion(pollable_fd_state& fd, temporary_buffer<char> buffer)
-                : read_completion_base(std::move(buffer)) {}
-            void complete(size_t bytes) noexcept final {
-                _buffer.trim(bytes);
-                _result.set_value(std::move(_buffer));
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<read_some_completion>(fd, ba->allocate_buffer());
+        auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
         const uint64_t position_file_offset = -1;
         auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, desc->get_write(), desc->get_size(), false);
         return submit_request(std::move(desc), std::move(req));
     }
 
     virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) final {
-        class sendmsg_completion final : public sendmsg_completion_base {
-        public:
-            sendmsg_completion(std::span<iovec> iovs, size_t len)
-                : sendmsg_completion_base(iovs, len) {}
-            void complete(size_t bytes) noexcept final {
-                _result.set_value(bytes);
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<sendmsg_completion>(iovs, len);
+        auto desc = std::make_unique<sendmsg_completion_base>(iovs, len);
         auto req = internal::io_request::make_sendmsg(fd.fd.get(), desc->msghdr(), MSG_NOSIGNAL);
         return submit_request(std::move(desc), std::move(req));
     }
 
 #if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override {
-        class send_completion final : public send_completion_base {
-        public:
-            send_completion(pollable_fd_state& fd, size_t to_write)
-                : send_completion_base(to_write) {}
-            void complete(size_t bytes) noexcept final {
-                _result.set_value(bytes);
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<send_completion>(fd, len);
+        auto desc = std::make_unique<send_completion_base>(fd, len);
         auto req = internal::io_request::make_send(fd.fd.get(), buffer, len, MSG_NOSIGNAL);
         return submit_request(std::move(desc), std::move(req));
     }
@@ -2422,17 +2378,7 @@ public:
             auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size(), 0, _uring_buffer_ring.buf_group());
             return submit_request(std::move(desc), std::move(req));
         }
-        class recv_some_completion final : public read_completion_base {
-        public:
-            recv_some_completion(pollable_fd_state& fd, temporary_buffer<char> buffer)
-                : read_completion_base(std::move(buffer)) {}
-            void complete(size_t bytes) noexcept final {
-                _buffer.trim(bytes);
-                _result.set_value(std::move(_buffer));
-                delete this;
-            }
-        };
-        auto desc = std::make_unique<recv_some_completion>(fd, ba->allocate_buffer());
+        auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
         auto req = internal::io_request::make_recv(fd.fd.get(), desc->get_write(), desc->get_size(), 0);
         return submit_request(std::move(desc), std::move(req));
     }

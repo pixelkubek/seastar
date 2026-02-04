@@ -1607,9 +1607,10 @@ protected:
         ::fcntl(tfd, F_SETFL, ::fcntl(tfd, F_GETFL) | O_NONBLOCK);
     }
 
-    virtual ~reactor_backend_uring_base() = default;
     
 public:
+    virtual ~reactor_backend_uring_base() = default;
+
     virtual bool reap_kernel_completions() override {
         return do_process_kernel_completions();
     }

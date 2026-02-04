@@ -1407,7 +1407,7 @@ protected:
         }
     };
 
-    class promise_bytes_completion_base : public promise_completion_base<size_t> {
+    class promise_size_completion_base : public promise_completion_base<size_t> {
     public:
         void complete(size_t bytes) noexcept override {
             _result.set_value(bytes);
@@ -1464,7 +1464,7 @@ protected:
         }
     };
 
-    class recvmsg_completion_base : public promise_bytes_completion_base {
+    class recvmsg_completion_base : public promise_size_completion_base {
     protected:
         std::vector<iovec> _iov;
         ::msghdr _mh = {};
@@ -1498,7 +1498,7 @@ protected:
         }
     };
 
-    class sendmsg_completion_base : public promise_bytes_completion_base {
+    class sendmsg_completion_base : public promise_size_completion_base {
     protected:
         ::msghdr _mh = {};
         const size_t _to_write;
@@ -1516,7 +1516,7 @@ protected:
         }
     };
 
-    class send_completion_base : public promise_bytes_completion_base {
+    class send_completion_base : public promise_size_completion_base {
     protected:
         const size_t _to_write;
     public:
@@ -2311,7 +2311,7 @@ public:
     }
 
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override {
-        auto desc = std::make_unique<promise_bytes_completion_base>();
+        auto desc = std::make_unique<promise_size_completion_base>();
         const uint64_t position_file_offset = -1;
         auto req = internal::io_request::make_read(fd.fd.get(), position_file_offset, buffer, len, false);
         return submit_request(std::move(desc), std::move(req));

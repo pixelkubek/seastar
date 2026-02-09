@@ -2173,8 +2173,8 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         };
 
         static constexpr uint16_t s_buffer_group_id = 0;
-        static constexpr unsigned s_ring_entries = 32;
-        static constexpr size_t s_buffer_size = 1<<16;
+        const unsigned ring_entries;
+        const size_t ring_buffer_size;
 
         lw_shared_ptr<io_uring_holder> _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
@@ -2183,30 +2183,32 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         const int _mask = 0;
 
     public:
-        explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring)
-            : _uring(std::move(ring))
-            , _mask(::io_uring_buf_ring_mask(s_ring_entries)) {
+        explicit ring_buffer_provider_impl(lw_shared_ptr<io_uring_holder> ring, uring_buffer_ring_config config)
+            : ring_entries(config.entries)
+            , ring_buffer_size(config.size)
+            , _uring(std::move(ring))
+            , _mask(::io_uring_buf_ring_mask(ring_entries)) {
             int err = 0;
-            _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), s_ring_entries, s_buffer_group_id, 0, &err);
+            _buffer_ring = ::io_uring_setup_buf_ring(_uring->get_ptr(), ring_entries, s_buffer_group_id, 0, &err);
             if (err) {
                 throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
             }
 
-            _buffers.reserve(s_ring_entries);
-            for (unsigned i = 0; i < s_ring_entries; ++i) {
+            _buffers.reserve(ring_entries);
+            for (unsigned i = 0; i < ring_entries; ++i) {
                 void *ptr;
-                if (int err = posix_memalign(&ptr, memory::page_size, s_buffer_size); err) {
+                if (int err = posix_memalign(&ptr, memory::page_size, ring_buffer_size); err) {
                     throw std::system_error(err, std::generic_category(), "posix_memalign");
                 }
-                _buffers.push_back({static_cast<char*>(ptr), s_buffer_size});
-                ::io_uring_buf_ring_add(_buffer_ring, ptr, s_buffer_size, i, _mask, i);
+                _buffers.push_back({static_cast<char*>(ptr), ring_buffer_size});
+                ::io_uring_buf_ring_add(_buffer_ring, ptr, ring_buffer_size, i, _mask, i);
             }
-            ::io_uring_buf_ring_advance(_buffer_ring, s_ring_entries);
+            ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
         }
 
         ~ring_buffer_provider_impl() {
             if (_buffer_ring) {
-                int ret = ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, s_ring_entries, s_buffer_group_id);
+                int ret = ::io_uring_free_buf_ring(_uring->get_ptr(), _buffer_ring, ring_entries, s_buffer_group_id);
                 if (ret != 0) {
                     seastar_logger.warn("freeing io_uring buffer ring failed: {}", std::system_error(-ret, std::generic_category(), "io_uring_free_buf_ring"));
                 }
@@ -2247,7 +2249,7 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         }
 
         size_t buffer_size() const noexcept {
-            return s_buffer_size;
+            return ring_buffer_size;
         }
 
         uint16_t buf_group() const noexcept {
@@ -2259,11 +2261,13 @@ class reactor_backend_asymmetric_uring final : public reactor_backend {
         lw_shared_ptr<ring_buffer_provider_impl> _impl;
 
     public:
-        explicit ring_buffer_provider(lw_shared_ptr<io_uring_holder> ring) {
-            try {
-                _impl = seastar::make_lw_shared<ring_buffer_provider_impl>(ring);
-            } catch (const std::exception& e) {
-                seastar_logger.warn("io_uring buffer ring disabled: {}", e);
+        explicit ring_buffer_provider(lw_shared_ptr<io_uring_holder> ring, std::optional<uring_buffer_ring_config> config_opt) {
+            if (config_opt.has_value()) {
+                try {
+                    _impl = seastar::make_lw_shared<ring_buffer_provider_impl>(ring, config_opt.value());
+                } catch (const std::exception& e) {
+                    seastar_logger.warn("io_uring buffer ring disabled: {}", e);
+                }
             }
         }
 
@@ -2405,7 +2409,7 @@ public:
             , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
             , _hrtimer_completion(_r, _hrtimer_timerfd)
             , _smp_wakeup_completion(_r._notify_eventfd)
-            , _uring_buffer_ring(_uring) {
+            , _uring_buffer_ring(_uring, r._cfg.buffer_ring_config) {
         // Protect against spurious wakeups - if we get notified that the timer has
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         auto tfd = _r._task_quota_timer.get();

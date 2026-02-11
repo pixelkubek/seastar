@@ -268,6 +268,7 @@ struct sched_group_config {
 
 std::array<double, 4> quantiles = { 0.5, 0.95, 0.99, 0.999};
 std::array<double, 2> quantiles_short = { 0.5, 0.9 };
+const double throughput_quantile = 0.8;
 static bool keep_files = false;
 
 future<> maybe_remove_file(sstring fname) {
@@ -298,6 +299,10 @@ protected:
     ::sleep_fn _sleep_fn = timer_sleep<lowres_clock>;
     timer<> _thinker;
 
+    timer<> _throughput_recorder;
+    accumulator_type _throughputs;
+    uint64_t _previous_total_messages;
+
     virtual future<> do_start(sstring dir, directory_entry_type type) = 0;
     virtual future<size_t> issue_request(char *buf, io_intent* intent) = 0;
 public:
@@ -308,12 +313,16 @@ public:
         , _latencies(extended_p_square_probabilities = quantiles)
         , _sleep_fn(_config.options.sleep_fn)
         , _thinker([this] { think_tick(); })
+        , _throughput_recorder([this] { register_throughput(); })
+        , _throughputs(extended_p_square_probabilities = std::vector<double>{throughput_quantile})
+        , _previous_total_messages(0)
     {
         if (_config.shard_info.think_after > 0us) {
             _thinker.arm(std::chrono::duration_cast<std::chrono::microseconds>(_config.shard_info.think_after));
         } else if (_config.shard_info.think_time > 0us) {
             _think = true;
         }
+        _throughput_recorder.arm_periodic(1s);
     }
 
     virtual ~class_data() = default;
@@ -328,6 +337,14 @@ private:
             _think = true;
             _thinker.arm(std::chrono::duration_cast<std::chrono::microseconds>(_config.shard_info.think_time));
         }
+    }
+
+    // Calculate the throughput (kb/s) from the last second and store the result in an accumulator
+    void register_throughput() {
+        auto this_second = total_data() - _previous_total_messages;
+        auto throughput_kbs = (this_second >> 10);
+        _previous_total_messages += this_second;
+        _throughputs(throughput_kbs);
     }
 
     future<> issue_request(char* buf, io_intent* intent, std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point stop) {
@@ -520,6 +537,10 @@ protected:
         return quantile(_latencies, quantile_probability = q);
     }
 
+    double quantile_throughput(double q) const {
+        return quantile(_throughputs, quantile_probability = q);
+    }
+
     uint64_t requests() const noexcept {
         return _requests;
     }
@@ -705,6 +726,7 @@ public:
         auto throughput_kbs = (total_data() >> 10) / total_duration().count();
         auto iops = requests() / total_duration().count();
         out << YAML::Key << "throughput" << YAML::Value << throughput_kbs << YAML::Comment("kB/s");
+        out << YAML::Key << fmt::format("p{}_throughput", throughput_quantile) << YAML::Value << quantile_throughput(throughput_quantile) << YAML::Comment("kB/s");
         out << YAML::Key << "IOPS" << YAML::Value << iops;
         out << YAML::Key << "latencies" << YAML::Comment("usec");
         out << YAML::BeginMap;

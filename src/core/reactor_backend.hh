@@ -336,6 +336,7 @@ public:
 };
 
 class reactor_backend_uring;
+class reactor_backend_asymmetric_uring;
 
 class reactor_backend_selector {
     std::string _name;
@@ -352,8 +353,19 @@ public:
     }
 };
 
+#ifdef SEASTAR_HAVE_URING
+
+namespace uring {
+
+// QUEUE_LEN is more or less arbitrary. Too low and we'll be
+// issuing too small batches, too high and we require too much locked
+// memory, but otherwise it doesn't matter.
+inline constexpr unsigned QUEUE_LEN = 200;
+
+} // namespace uring
+
+#endif // SEASTAR_HAVE_URING
+
 }
 
-
 template <> struct fmt::formatter<seastar::reactor_backend_selector> : fmt::ostream_formatter {};
-

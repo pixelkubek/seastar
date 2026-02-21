@@ -1211,7 +1211,7 @@ detect_asymmetric_io_uring() {
         // locked memory to be safe (8MB is what newer kernels and newer systemd provide)
         return false;
     }
-    auto ring_opt = uring::try_create_base_asymmetric_uring(sched_getcpu(), false);
+    auto ring_opt = uring::try_create_base_asymmetric_uring(sched_getcpu(), sched_getcpu(), false);
     if (ring_opt) {
         ::io_uring_queue_exit(&ring_opt.value());
     }
@@ -1981,7 +1981,7 @@ try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error) {
 }
 
 std::optional<::io_uring>
-try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
+try_create_base_asymmetric_uring(unsigned sq_cpu, unsigned worker_cpu, bool throw_on_error) {
     auto maybe_throw = [&] (auto exception) {
         if (throw_on_error) {
             throw exception;
@@ -1990,7 +1990,7 @@ try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
 
     auto params = ::io_uring_params{};
     params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
-    params.sq_thread_cpu = worker_cpu;
+    params.sq_thread_cpu = sq_cpu;
     params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
 
     auto maybe_uring = try_create_asymmetric_uring_impl(params, throw_on_error);
@@ -2005,6 +2005,7 @@ try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
 
     ::cpu_set_t worker_cpu_set;
     CPU_ZERO(&worker_cpu_set);
+    CPU_SET(sq_cpu, &worker_cpu_set);
     CPU_SET(worker_cpu, &worker_cpu_set);
     int err = ::io_uring_register_iowq_aff(&ring, sizeof(worker_cpu_set), &worker_cpu_set);
     if (err != 0) {
@@ -2028,19 +2029,21 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, std::any>& v
     }
 }
 
-unsigned
+std::pair<unsigned, unsigned>
 select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
     SEASTAR_ASSERT(!worker_cpus.empty());
     const size_t selected_cpu_rank = get_uring_group_id(shard_id, worker_cpus);
-    return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
+    return {*std::next(worker_cpus.cbegin(), selected_cpu_rank), selected_cpu_rank};
 }
 
 bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id < worker_cpus.size();
+    return shard_id < ((worker_cpus.size() + 1) / 2);
 }
 
 unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id % worker_cpus.size();
+    // 2 cores per group
+    int number_of_groups = (worker_cpus.size() + 1) / 2;
+    return shard_id % number_of_groups;
 }
 
 class buf_group_io_completion final: public io_completion {

@@ -380,9 +380,9 @@ std::optional<::io_uring>
 try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error);
 
 std::optional<::io_uring>
-try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error);
+try_create_base_asymmetric_uring(unsigned sq_cpu, unsigned worker_cpu, bool throw_on_error);
 
-unsigned
+std::pair<unsigned, unsigned>
 select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus);
 
 bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;

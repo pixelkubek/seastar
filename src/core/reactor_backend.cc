@@ -2005,7 +2005,7 @@ try_create_base_asymmetric_uring(unsigned sq_cpu, unsigned worker_cpu, bool thro
 
     ::cpu_set_t worker_cpu_set;
     CPU_ZERO(&worker_cpu_set);
-    CPU_SET(sq_cpu, &worker_cpu_set);
+    //CPU_SET(sq_cpu, &worker_cpu_set);
     CPU_SET(worker_cpu, &worker_cpu_set);
     int err = ::io_uring_register_iowq_aff(&ring, sizeof(worker_cpu_set), &worker_cpu_set);
     if (err != 0) {

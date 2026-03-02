@@ -1203,9 +1203,12 @@ detect_io_uring() {
     return bool(ring_opt);
 }
 
-class reactor_backend_uring final : public reactor_backend {
+class reactor_backend_uring_base : public reactor_backend {
+protected:
     reactor& _r;
     ::io_uring _uring;
+
+private:
     bool _did_work_while_getting_sqe = false;
     bool _has_pending_submissions = false;
     file_desc _hrtimer_timerfd;
@@ -1247,7 +1250,7 @@ class reactor_backend_uring final : public reactor_backend {
             SEASTAR_ASSERT(!ret || *ret == 8);
             _armed = false;
         }
-        void maybe_rearm(reactor_backend_uring& be) {
+        void maybe_rearm(reactor_backend_uring_base& be) {
             if (_armed) {
                 return;
             }
@@ -1277,7 +1280,7 @@ class reactor_backend_uring final : public reactor_backend {
 
     hrtimer_completion _hrtimer_completion;
     smp_wakeup_completion _smp_wakeup_completion;
-private:
+
     static file_desc make_timerfd() {
         return file_desc::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK);
     }
@@ -1286,7 +1289,8 @@ private:
     ::io_uring_sqe* try_get_sqe() {
         return ::io_uring_get_sqe(&_uring);
     }
-
+    
+protected:
     bool do_flush_submission_ring() {
         if (_has_pending_submissions) {
             _has_pending_submissions = false;
@@ -1433,22 +1437,21 @@ private:
         _r._io_sink.submit(desc.release(), std::move(req));
         return fut;
     }
-public:
-    explicit reactor_backend_uring(reactor& r)
-            : _r(r)
-            , _uring(try_create_uring(s_queue_len, true).value())
-            , _hrtimer_timerfd(make_timerfd())
-            , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
-            , _hrtimer_completion(_r, _hrtimer_timerfd)
-            , _smp_wakeup_completion(_r._notify_eventfd) {
+
+    explicit reactor_backend_uring_base(reactor& r, ::io_uring uring)
+    : _r(r)
+    , _uring(uring)
+    , _hrtimer_timerfd(make_timerfd())
+    , _preempt_io_context(_r, _r._task_quota_timer, _hrtimer_timerfd)
+    , _hrtimer_completion(_r, _hrtimer_timerfd)
+    , _smp_wakeup_completion(_r._notify_eventfd) {
         // Protect against spurious wakeups - if we get notified that the timer has
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         auto tfd = _r._task_quota_timer.get();
         ::fcntl(tfd, F_SETFL, ::fcntl(tfd, F_GETFL) | O_NONBLOCK);
     }
-    ~reactor_backend_uring() {
-        ::io_uring_queue_exit(&_uring);
-    }
+
+public:
     virtual std::string_view get_backend_name() const override {
         return "io_uring";
     }
@@ -1874,6 +1877,16 @@ public:
     }
     virtual pollable_fd_state_ptr make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override {
         return pollable_fd_state_ptr(new uring_pollable_fd_state(std::move(fd), std::move(speculate)));
+    }
+};
+
+class reactor_backend_uring final : public reactor_backend_uring_base {
+    explicit reactor_backend_uring(reactor& r)
+        : reactor_backend_uring_base(r, try_create_uring(uring::QUEUE_LEN, true).value()) {
+    }
+
+    ~reactor_backend_uring() override {
+        ::io_uring_queue_exit(&_uring);
     }
 };
 

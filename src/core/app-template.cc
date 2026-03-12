@@ -224,6 +224,9 @@ app_template::run_deprecated(int ac, char ** av, std::function<void ()>&& func) 
         program_options::variables_map_extracting_visitor visitor(configuration);
         _opts.mutate(visitor);
     }
+    _opts.reactor_opts.async_workers_cpuset.set_value(*resource::parse_cpuset("0-13"));
+    _opts.reactor_opts.uring_buffer_ring_entries.set_value(16u);
+    _opts.reactor_opts.uring_buffer_ring_size.set_value(std::string("128kB"));
     _opts.reactor_opts._argv0 = std::string(av[0]);
     _opts.reactor_opts._auto_handle_sigint_sigterm = _opts.auto_handle_sigint_sigterm;
     if (auto* native_stack = dynamic_cast<net::native_stack_options*>(_opts.reactor_opts.network_stack.get_selected_candidate_opts())) {

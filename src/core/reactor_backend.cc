@@ -2159,7 +2159,7 @@ private:
         static constexpr uint16_t s_buffer_group_id = 0;
         const unsigned ring_entries;
         const size_t ring_buffer_size;
-        
+
         ::io_uring* _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
         std::vector<std::optional<buffer>> _buffers;
@@ -2178,7 +2178,7 @@ private:
                 }
             }
         }
-        
+
         bool has_free_buffer_slot() const noexcept {
             return _buffers.size() > _reserved_buffer_slot_count;
         }
@@ -2236,7 +2236,7 @@ private:
         size_t get_reserved_count() const noexcept {
             return _reserved_buffer_slot_count;
         }
-        
+
         bool reserve() {
             if (has_free_buffer_slot()) {
                 _reserved_buffer_slot_count++;
@@ -2258,8 +2258,8 @@ private:
             buffer buf = get_buf(id);
             char* ptr = static_cast<char*>(buf.get_ptr());
             size_t len = buf.get_len();
-            auto d = make_deleter([ret = this, buf = std::move(buf)] mutable {
-                ret->return_buf(std::move(buf));
+            auto d = make_deleter([this, buf = std::move(buf)] mutable {
+                return_buf(std::move(buf));
             });
             return {ptr, len, std::move(d)};
         }

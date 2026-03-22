@@ -2115,47 +2115,68 @@ public:
 
 class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
 private:
-    class ring_buffer_provider_impl {
+    class ring_buffer_provider {
         struct buffer {
-            char* ptr;
+            void* ptr;
             size_t len;
+
+            explicit buffer(size_t len): len(len) {
+                if (int err = posix_memalign(&ptr, memory::page_size, len); err) {
+                    throw std::system_error(err, std::generic_category(), "posix_memalign");
+                }
+            }
+
+            buffer(const buffer&) = delete;
+            buffer(buffer&&) = default;
+            buffer& operator=(const buffer&) = delete;
+            buffer& operator=(buffer&&) = default;
+
+            ~buffer() noexcept {
+                std::free(std::exchange(ptr, nullptr));
+                len = 0;
+            }
         };
 
         static constexpr uint16_t s_buffer_group_id = 0;
         const unsigned ring_entries;
         const size_t ring_buffer_size;
-
+        
         ::io_uring* _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
-        std::vector<buffer> _buffers;
-        size_t _reserved_buffer_count = 0;
+        std::vector<std::optional<buffer>> _buffers;
+        size_t _reserved_buffer_slot_count = 0;
+        size_t _allocated_buffers = 0;
         const int _mask = 0;
 
-    public:
-        explicit ring_buffer_provider_impl(::io_uring* ring, uring_buffer_ring_config config)
-                : ring_entries(config.entries)
-                , ring_buffer_size(config.size)
-                , _uring(ring)
-                , _mask(::io_uring_buf_ring_mask(ring_entries)) {
-            int err = 0;
-            _buffer_ring = ::io_uring_setup_buf_ring(_uring, ring_entries, s_buffer_group_id, 0, &err);
-            if (err) {
-                throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
-            }
-
-            _buffers.reserve(ring_entries);
-            for (unsigned i = 0; i < ring_entries; ++i) {
-                void* ptr;
-                if (int err = posix_memalign(&ptr, memory::page_size, ring_buffer_size); err) {
-                    throw std::system_error(err, std::generic_category(), "posix_memalign");
+        void add_buf(buffer buf) noexcept {
+            for (size_t i = 0; i < _buffers.size(); i++) {
+                if (!_buffers[i].has_value()) {
+                    _buffers[i].emplace(std::move(buf));
+                    ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, i, _mask, 0);
+                    ::io_uring_buf_ring_advance(_buffer_ring, 1);
+                    _allocated_buffers++;
+                    return;
                 }
-                _buffers.push_back({static_cast<char*>(ptr), ring_buffer_size});
-                ::io_uring_buf_ring_add(_buffer_ring, ptr, ring_buffer_size, i, _mask, i);
             }
-            ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
+        }
+        
+        bool has_free_buffer_slot() const noexcept {
+            return _buffers.size() > _reserved_buffer_slot_count;
         }
 
-        ~ring_buffer_provider_impl() {
+        bool has_enough_allocated_buffers() const noexcept {
+            return _allocated_buffers >= _reserved_buffer_slot_count;
+        }
+
+        buffer get_buf(size_t id) {
+            SEASTAR_ASSERT(id < _buffers.size());
+            SEASTAR_ASSERT(_buffers[id].has_value());
+            _allocated_buffers--;
+            _reserved_buffer_slot_count--;
+            return std::move(_buffers[id].value());
+        }
+
+        void reset() noexcept {
             if (_buffer_ring) {
                 int ret = ::io_uring_free_buf_ring(_uring, _buffer_ring, ring_entries, s_buffer_group_id);
                 if (ret != 0) {
@@ -2163,46 +2184,66 @@ private:
                 }
                 _buffer_ring = nullptr;
             }
-            for (auto& buf : _buffers) {
-                std::free(buf.ptr);
-            }
             _buffers.clear();
-            _reserved_buffer_count = 0;
+            _reserved_buffer_slot_count = 0;
+            _allocated_buffers = 0;
+        }
+    public:
+        explicit ring_buffer_provider(::io_uring* ring, std::optional<uring_buffer_ring_config> config_opt)
+                : ring_entries(config_opt.has_value() ? config_opt->entries : 0)
+                , ring_buffer_size(config_opt.has_value() ? config_opt->size : 0)
+                , _uring(ring)
+                , _mask(::io_uring_buf_ring_mask(ring_entries))
+        {
+            if (config_opt.has_value()) {
+                int err = 0;
+                _buffer_ring = ::io_uring_setup_buf_ring(_uring, ring_entries, s_buffer_group_id, 0, &err);
+                if (err) {
+                    throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
+                }
+
+                _buffers.reserve(ring_entries);
+                for (unsigned i = 0; i < ring_entries; ++i) {
+                    _buffers.emplace_back(ring_buffer_size);
+                    ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->ptr, ring_buffer_size, i, _mask, i);
+                }
+                ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
+            }
         }
 
         size_t get_reserved_count() const noexcept {
-            return _reserved_buffer_count;
+            return _reserved_buffer_slot_count;
         }
-
-        bool has_unreserved_buffer() const {
-            return _buffers.size() > _reserved_buffer_count;
-        }
-
+        
         bool reserve() {
-            if (has_unreserved_buffer()) {
-                _reserved_buffer_count++;
+            if (has_free_buffer_slot()) {
+                _reserved_buffer_slot_count++;
+
+                if (!has_enough_allocated_buffers()) {
+                    add_buf(buffer(ring_buffer_size));
+                }
+
                 return true;
             }
             return false;
         }
 
-        void drop_reservation() {
-            _reserved_buffer_count--;
+        void drop_reservation() noexcept {
+            _reserved_buffer_slot_count--;
         }
 
-        buffer get_buf(size_t id) {
-            SEASTAR_ASSERT(id < _buffers.size());
-            return _buffers[id];
+        temporary_buffer<char> borrow(size_t id) {
+            buffer buf = get_buf(id);
+            char* ptr = static_cast<char*>(buf.ptr);
+            size_t len = buf.len;
+            auto d = make_deleter([this, buf = std::move(buf)] mutable {
+                return_buf(std::move(buf));
+            });
+            return {ptr, len, std::move(d)};
         }
 
-        void return_buf(size_t id) {
-            SEASTAR_ASSERT(id < _buffers.size());
-            const auto& buf = _buffers[id];
-            ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, id, _mask, 0);
-            ::io_uring_buf_ring_advance(_buffer_ring, 1);
-            if (_reserved_buffer_count) {
-                _reserved_buffer_count--;
-            }
+        void return_buf(buffer buf) noexcept {
+            add_buf(std::move(buf));
         }
 
         size_t buffer_size_in_bytes() const noexcept {
@@ -2212,62 +2253,9 @@ private:
         uint16_t buf_group() const noexcept {
             return s_buffer_group_id;
         }
-    };
 
-    class ring_buffer_provider {
-        lw_shared_ptr<ring_buffer_provider_impl> _impl;
-
-    public:
-        explicit ring_buffer_provider(::io_uring* ring, std::optional<uring_buffer_ring_config> config_opt) {
-            if (config_opt.has_value()) {
-                try {
-                    _impl = seastar::make_lw_shared<ring_buffer_provider_impl>(ring, config_opt.value());
-                } catch (const std::exception& e) {
-                    seastar_logger.warn("io_uring buffer ring disabled: {}", e);
-                }
-            }
-        }
-
-        bool reserve() {
-            if (_impl) {
-                return _impl->reserve();
-            }
-            return false;
-        }
-
-        void drop_reservation() {
-            if (_impl) {
-                _impl->drop_reservation();
-            }
-        }
-
-        size_t get_reserved_count() const noexcept {
-            if (_impl) {
-                return _impl->get_reserved_count();
-            }
-            return 0;
-        }
-
-        size_t buffer_size_in_bytes() const {
-            if (_impl) {
-                return _impl->buffer_size_in_bytes();
-            }
-            return 0;
-        }
-
-        uint16_t buf_group() const {
-            if (_impl) {
-                return _impl->buf_group();
-            }
-            return 0;
-        }
-
-        temporary_buffer<char> borrow(size_t id) {
-            auto [ptr, len] = _impl->get_buf(id);
-            auto d = make_deleter([impl = _impl, id] {
-                impl->return_buf(id);
-            });
-            return {ptr, len, std::move(d)};
+        ~ring_buffer_provider() noexcept {
+            reset();
         }
     };
     ring_buffer_provider _uring_buffer_ring;

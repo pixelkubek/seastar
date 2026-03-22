@@ -2233,7 +2233,7 @@ private:
 
         temporary_buffer<char> borrow(size_t id) {
             buffer buf = get_buf(id);
-            char* ptr = static_cast<char*>(buf.get_write());
+            char* ptr = buf.get_write();
             size_t len = buf.size();
             auto d = make_deleter([this, buf = std::move(buf)] mutable {
                 return_buf(std::move(buf));

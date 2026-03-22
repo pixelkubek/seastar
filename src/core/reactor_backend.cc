@@ -2220,7 +2220,7 @@ private:
                 _reserved_buffer_slot_count++;
 
                 if (!has_enough_allocated_buffers()) {
-                    add_buf(buffer(ring_buffer_size));
+                    add_buf(new_buf(ring_buffer_size));
                 }
 
                 return true;

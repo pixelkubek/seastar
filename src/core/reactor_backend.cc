@@ -2195,7 +2195,8 @@ private:
         {
             if (config_opt.has_value()) {
                 int err = 0;
-                _buffer_ring = ::io_uring_setup_buf_ring(_uring, ring_entries, s_buffer_group_id, 0, &err);
+                constexpr unsigned no_flags = 0;
+                _buffer_ring = ::io_uring_setup_buf_ring(_uring, ring_entries, s_buffer_group_id, no_flags, &err);
                 if (err) {
                     throw std::system_error(-err, std::generic_category(), "io_uring_setup_buf_ring");
                 }

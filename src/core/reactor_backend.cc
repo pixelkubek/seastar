@@ -23,8 +23,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <seastar/core/deleter.hh>
-#include <seastar/core/temporary_buffer.hh>
 #include <thread>
 #include <utility>
 #include <variant>

@@ -2156,8 +2156,8 @@ private:
             return _buffers.size() > _reserved_buffer_slot_count;
         }
 
-        bool has_enough_allocated_buffers() const noexcept {
-            return _allocated_buffers >= _reserved_buffer_slot_count;
+        bool has_free_allocated_buffer() const noexcept {
+            return _allocated_buffers > _reserved_buffer_slot_count;
         }
 
         buffer get_buf(size_t id) {
@@ -2216,16 +2216,17 @@ private:
         }
 
         bool reserve() {
-            if (has_free_buffer_slot()) {
-                _reserved_buffer_slot_count++;
-
-                if (!has_enough_allocated_buffers()) {
-                    add_buf(new_buf(ring_buffer_size));
-                }
-
-                return true;
+            if (!has_free_buffer_slot()) {
+                return false;
             }
-            return false;
+
+            if (!has_free_allocated_buffer()) {
+                add_buf(new_buf(ring_buffer_size));
+            }
+
+            _reserved_buffer_slot_count++;
+
+            return true;
         }
 
         void drop_reservation() noexcept {

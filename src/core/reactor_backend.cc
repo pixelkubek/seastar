@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <seastar/core/deleter.hh>
+#include <seastar/core/temporary_buffer.hh>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -2116,45 +2118,7 @@ public:
 class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
 private:
     class ring_buffer_provider {
-        class buffer {
-            void* _ptr;
-            size_t _len;
-
-        public:
-            explicit buffer(size_t len): _len(len) {
-                int err = posix_memalign(&_ptr, memory::page_size, len);
-                if (err) {
-                    throw std::system_error(err, std::generic_category(), "posix_memalign");
-                }
-            }
-
-            buffer(const buffer&) = delete;
-
-            buffer(buffer&& other) noexcept
-                : _ptr(std::exchange(other._ptr, nullptr))
-                , _len(std::exchange(other._len, 0)) {}
-
-            buffer& operator=(const buffer&) = delete;
-
-            buffer& operator=(buffer&& other) noexcept {
-                _ptr = std::exchange(other._ptr, nullptr);
-                _len = std::exchange(other._len, 0);
-                return *this;
-            }
-
-            void* get_ptr() const noexcept {
-                return _ptr;
-            }
-
-            size_t get_len() const noexcept {
-                return _len;
-            }
-
-            ~buffer() noexcept {
-                std::free(std::exchange(_ptr, nullptr));
-                _len = 0;
-            }
-        };
+        using buffer = temporary_buffer<char>;
 
         static constexpr uint16_t s_buffer_group_id = 0;
         const unsigned ring_entries;
@@ -2167,11 +2131,20 @@ private:
         size_t _allocated_buffers = 0;
         const int _mask = 0;
 
+        static buffer new_buf(size_t len) {
+            void *ptr;
+            int err = posix_memalign(&ptr, memory::page_size, len);
+            if (err) {
+                throw std::system_error(err, std::generic_category(), "posix_memalign");
+            }
+            return {static_cast<char*>(ptr), len, make_free_deleter(ptr)};
+        }
+    
         void add_buf(buffer buf) noexcept {
             for (size_t i = 0; i < _buffers.size(); i++) {
                 if (!_buffers[i].has_value()) {
                     _buffers[i].emplace(std::move(buf));
-                    ::io_uring_buf_ring_add(_buffer_ring, buf.get_ptr(), buf.get_len(), i, _mask, 0);
+                    ::io_uring_buf_ring_add(_buffer_ring, buf.get_write(), buf.size(), i, _mask, 0);
                     ::io_uring_buf_ring_advance(_buffer_ring, 1);
                     _allocated_buffers++;
                     return;
@@ -2195,6 +2168,10 @@ private:
             auto ret = std::move(_buffers[id].value());
             _buffers[id].reset();
             return ret;
+        }
+
+        void return_buf(buffer buf) noexcept {
+            add_buf(std::move(buf));
         }
 
         void reset() noexcept {
@@ -2226,7 +2203,7 @@ private:
                 _buffers.reserve(ring_entries);
                 for (unsigned i = 0; i < ring_entries; ++i) {
                     _buffers.emplace_back(ring_buffer_size);
-                    ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->get_ptr(), ring_buffer_size, i, _mask, i);
+                    ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->get_write(), ring_buffer_size, i, _mask, i);
                 }
                 _allocated_buffers = ring_entries;
                 ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
@@ -2256,16 +2233,12 @@ private:
 
         temporary_buffer<char> borrow(size_t id) {
             buffer buf = get_buf(id);
-            char* ptr = static_cast<char*>(buf.get_ptr());
-            size_t len = buf.get_len();
+            char* ptr = static_cast<char*>(buf.get_write());
+            size_t len = buf.size();
             auto d = make_deleter([this, buf = std::move(buf)] mutable {
                 return_buf(std::move(buf));
             });
             return {ptr, len, std::move(d)};
-        }
-
-        void return_buf(buffer buf) noexcept {
-            add_buf(std::move(buf));
         }
 
         size_t buffer_size_in_bytes() const noexcept {

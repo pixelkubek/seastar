@@ -2127,7 +2127,7 @@ private:
         ::io_uring* _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
         std::vector<std::optional<buffer>> _buffers;
-        size_t _reserved_buffer_slot_count = 0;
+        size_t _reserved_buffer_count = 0;
         size_t _allocated_buffers = 0;
         const int _mask = 0;
 
@@ -2153,18 +2153,18 @@ private:
         }
 
         bool has_free_buffer_slot() const noexcept {
-            return _buffers.size() > _reserved_buffer_slot_count;
+            return _buffers.size() > _reserved_buffer_count;
         }
 
         bool has_free_allocated_buffer() const noexcept {
-            return _allocated_buffers > _reserved_buffer_slot_count;
+            return _allocated_buffers > _reserved_buffer_count;
         }
 
         buffer get_buf(size_t id) {
             SEASTAR_ASSERT(id < _buffers.size());
             SEASTAR_ASSERT(_buffers[id].has_value());
             _allocated_buffers--;
-            _reserved_buffer_slot_count--;
+            _reserved_buffer_count--;
             auto ret = std::move(_buffers[id].value());
             _buffers[id].reset();
             return ret;
@@ -2183,7 +2183,7 @@ private:
                 _buffer_ring = nullptr;
             }
             _buffers.clear();
-            _reserved_buffer_slot_count = 0;
+            _reserved_buffer_count = 0;
             _allocated_buffers = 0;
         }
     public:
@@ -2212,7 +2212,7 @@ private:
         }
 
         size_t get_reserved_count() const noexcept {
-            return _reserved_buffer_slot_count;
+            return _reserved_buffer_count;
         }
 
         bool reserve() {
@@ -2224,13 +2224,13 @@ private:
                 add_buf(new_buf(ring_buffer_size));
             }
 
-            _reserved_buffer_slot_count++;
+            _reserved_buffer_count++;
 
             return true;
         }
 
         void drop_reservation() noexcept {
-            _reserved_buffer_slot_count--;
+            _reserved_buffer_count--;
         }
 
         temporary_buffer<char> borrow(size_t id) {

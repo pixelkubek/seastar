@@ -2203,7 +2203,7 @@ private:
 
                 _buffers.reserve(ring_entries);
                 for (unsigned i = 0; i < ring_entries; ++i) {
-                    _buffers.emplace_back(ring_buffer_size);
+                    _buffers.emplace_back(new_buf(ring_buffer_size));
                     ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->get_write(), ring_buffer_size, i, _mask, i);
                 }
                 _allocated_buffers = ring_entries;

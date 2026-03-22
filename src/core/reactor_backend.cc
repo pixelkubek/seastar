@@ -2096,6 +2096,7 @@ public:
     buf_group_io_completion(pollable_fd_state& fd) {}
     void complete(size_t bytes) noexcept final {
         SEASTAR_ASSERT(_buffer_opt.has_value());
+        seastar_logger.info("Buffer has value: {}, {}", _buffer_opt.has_value(), (void*)_buffer_opt->get());
         _buffer_opt->trim(bytes);
         _result.set_value(std::move(*_buffer_opt));
         delete this;
@@ -2116,24 +2117,45 @@ public:
 class reactor_backend_asymmetric_uring final : public reactor_backend_uring_base {
 private:
     class ring_buffer_provider {
-        struct buffer {
-            void* ptr;
-            size_t len;
+        class buffer {
+            void* _ptr;
+            size_t _len;
 
-            explicit buffer(size_t len): len(len) {
-                if (int err = posix_memalign(&ptr, memory::page_size, len); err) {
+        public:
+            explicit buffer(size_t len): _len(len) {
+                seastar_logger.info("Posix_memalign {} bytes", len);
+                int err = posix_memalign(&_ptr, memory::page_size, len);
+                if (err) {
                     throw std::system_error(err, std::generic_category(), "posix_memalign");
                 }
+                seastar_logger.info("Posix_memaligned: {}, err={}", _ptr, err);
             }
 
             buffer(const buffer&) = delete;
-            buffer(buffer&&) = default;
+
+            buffer(buffer&& other) noexcept
+                : _ptr(std::exchange(other._ptr, nullptr))
+                , _len(std::exchange(other._len, 0)) {}
+
             buffer& operator=(const buffer&) = delete;
-            buffer& operator=(buffer&&) = default;
+
+            buffer& operator=(buffer&& other) noexcept {
+                _ptr = std::exchange(other._ptr, nullptr);
+                _len = std::exchange(other._len, 0);
+                return *this;
+            }
+
+            void* get_ptr() const noexcept {
+                return _ptr;
+            }
+
+            size_t get_len() const noexcept {
+                return _len;
+            }
 
             ~buffer() noexcept {
-                std::free(std::exchange(ptr, nullptr));
-                len = 0;
+                std::free(std::exchange(_ptr, nullptr));
+                _len = 0;
             }
         };
 
@@ -2152,9 +2174,10 @@ private:
             for (size_t i = 0; i < _buffers.size(); i++) {
                 if (!_buffers[i].has_value()) {
                     _buffers[i].emplace(std::move(buf));
-                    ::io_uring_buf_ring_add(_buffer_ring, buf.ptr, buf.len, i, _mask, 0);
+                    ::io_uring_buf_ring_add(_buffer_ring, buf.get_ptr(), buf.get_len(), i, _mask, 0);
                     ::io_uring_buf_ring_advance(_buffer_ring, 1);
                     _allocated_buffers++;
+                    seastar_logger.info("Added buffer {}", i);
                     return;
                 }
             }
@@ -2171,9 +2194,12 @@ private:
         buffer get_buf(size_t id) {
             SEASTAR_ASSERT(id < _buffers.size());
             SEASTAR_ASSERT(_buffers[id].has_value());
+            seastar_logger.info("Got buffer {}", id);
             _allocated_buffers--;
             _reserved_buffer_slot_count--;
-            return std::move(_buffers[id].value());
+            auto ret = std::move(_buffers[id].value());
+            _buffers[id].reset();
+            return ret;
         }
 
         void reset() noexcept {
@@ -2205,8 +2231,9 @@ private:
                 _buffers.reserve(ring_entries);
                 for (unsigned i = 0; i < ring_entries; ++i) {
                     _buffers.emplace_back(ring_buffer_size);
-                    ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->ptr, ring_buffer_size, i, _mask, i);
+                    ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->get_ptr(), ring_buffer_size, i, _mask, i);
                 }
+                _allocated_buffers = ring_entries;
                 ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
             }
         }
@@ -2217,10 +2244,12 @@ private:
         
         bool reserve() {
             if (has_free_buffer_slot()) {
+                seastar_logger.info("Found a free buf slot - had {} alloced with {} reserved", _allocated_buffers, _reserved_buffer_slot_count);
                 _reserved_buffer_slot_count++;
 
                 if (!has_enough_allocated_buffers()) {
                     add_buf(buffer(ring_buffer_size));
+                    seastar_logger.info("Allocating new ring buf - has {} alloced with {} reserved", _allocated_buffers, _reserved_buffer_slot_count);
                 }
 
                 return true;
@@ -2234,10 +2263,10 @@ private:
 
         temporary_buffer<char> borrow(size_t id) {
             buffer buf = get_buf(id);
-            char* ptr = static_cast<char*>(buf.ptr);
-            size_t len = buf.len;
-            auto d = make_deleter([this, buf = std::move(buf)] mutable {
-                return_buf(std::move(buf));
+            char* ptr = static_cast<char*>(buf.get_ptr());
+            size_t len = buf.get_len();
+            auto d = make_deleter([ret = this, buf = std::move(buf)] mutable {
+                ret->return_buf(std::move(buf));
             });
             return {ptr, len, std::move(d)};
         }

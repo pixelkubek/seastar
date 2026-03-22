@@ -2096,7 +2096,6 @@ public:
     buf_group_io_completion(pollable_fd_state& fd) {}
     void complete(size_t bytes) noexcept final {
         SEASTAR_ASSERT(_buffer_opt.has_value());
-        seastar_logger.info("Buffer has value: {}, {}", _buffer_opt.has_value(), (void*)_buffer_opt->get());
         _buffer_opt->trim(bytes);
         _result.set_value(std::move(*_buffer_opt));
         delete this;
@@ -2123,12 +2122,10 @@ private:
 
         public:
             explicit buffer(size_t len): _len(len) {
-                seastar_logger.info("Posix_memalign {} bytes", len);
                 int err = posix_memalign(&_ptr, memory::page_size, len);
                 if (err) {
                     throw std::system_error(err, std::generic_category(), "posix_memalign");
                 }
-                seastar_logger.info("Posix_memaligned: {}, err={}", _ptr, err);
             }
 
             buffer(const buffer&) = delete;
@@ -2177,7 +2174,6 @@ private:
                     ::io_uring_buf_ring_add(_buffer_ring, buf.get_ptr(), buf.get_len(), i, _mask, 0);
                     ::io_uring_buf_ring_advance(_buffer_ring, 1);
                     _allocated_buffers++;
-                    seastar_logger.info("Added buffer {}", i);
                     return;
                 }
             }
@@ -2194,7 +2190,6 @@ private:
         buffer get_buf(size_t id) {
             SEASTAR_ASSERT(id < _buffers.size());
             SEASTAR_ASSERT(_buffers[id].has_value());
-            seastar_logger.info("Got buffer {}", id);
             _allocated_buffers--;
             _reserved_buffer_slot_count--;
             auto ret = std::move(_buffers[id].value());
@@ -2244,12 +2239,10 @@ private:
         
         bool reserve() {
             if (has_free_buffer_slot()) {
-                seastar_logger.info("Found a free buf slot - had {} alloced with {} reserved", _allocated_buffers, _reserved_buffer_slot_count);
                 _reserved_buffer_slot_count++;
 
                 if (!has_enough_allocated_buffers()) {
                     add_buf(buffer(ring_buffer_size));
-                    seastar_logger.info("Allocating new ring buf - has {} alloced with {} reserved", _allocated_buffers, _reserved_buffer_slot_count);
                 }
 
                 return true;

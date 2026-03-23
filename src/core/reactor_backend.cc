@@ -2125,8 +2125,8 @@ private:
         ::io_uring* _uring;
         ::io_uring_buf_ring* _buffer_ring = nullptr;
         std::vector<std::optional<buffer>> _buffers;
+        std::vector<size_t> _free_slots;
         size_t _reserved_buffer_count = 0;
-        size_t _allocated_buffers = 0;
         const int _mask = 0;
 
         static buffer new_buf(size_t len) {
@@ -2139,14 +2139,12 @@ private:
         }
     
         void add_buf(buffer buf) noexcept {
-            for (size_t i = 0; i < _buffers.size(); i++) {
-                if (!_buffers[i].has_value()) {
-                    _buffers[i].emplace(std::move(buf));
-                    ::io_uring_buf_ring_add(_buffer_ring, buf.get_write(), buf.size(), i, _mask, 0);
-                    ::io_uring_buf_ring_advance(_buffer_ring, 1);
-                    _allocated_buffers++;
-                    return;
-                }
+            if (!_free_slots.empty()) {
+                size_t index = _free_slots.back();
+                ::io_uring_buf_ring_add(_buffer_ring, buf.get_write(), buf.size(), index, _mask, 0);
+                ::io_uring_buf_ring_advance(_buffer_ring, 1);
+                _buffers[index].emplace(std::move(buf));
+                _free_slots.pop_back();
             }
         }
 
@@ -2154,35 +2152,26 @@ private:
             return _buffers.size() > _reserved_buffer_count;
         }
 
+        size_t allocated_buffers() const noexcept {
+            return _buffers.size() - _free_slots.size();
+        }
+
         bool has_free_allocated_buffer() const noexcept {
-            return _allocated_buffers > _reserved_buffer_count;
+            return allocated_buffers() > _reserved_buffer_count;
         }
 
         buffer get_buf(size_t id) {
             SEASTAR_ASSERT(id < _buffers.size());
             SEASTAR_ASSERT(_buffers[id].has_value());
-            _allocated_buffers--;
             _reserved_buffer_count--;
             auto ret = std::move(_buffers[id].value());
-            _buffers[id].reset();
+            _buffers[id] = std::nullopt;
+            _free_slots.push_back(id);
             return ret;
         }
 
         void return_buf(buffer buf) noexcept {
             add_buf(std::move(buf));
-        }
-
-        void reset() noexcept {
-            if (_buffer_ring) {
-                int ret = ::io_uring_free_buf_ring(_uring, _buffer_ring, ring_entries, s_buffer_group_id);
-                if (ret != 0) {
-                    seastar_logger.warn("freeing io_uring buffer ring failed: {}", std::system_error(-ret, std::generic_category(), "io_uring_free_buf_ring"));
-                }
-                _buffer_ring = nullptr;
-            }
-            _buffers.clear();
-            _reserved_buffer_count = 0;
-            _allocated_buffers = 0;
         }
     public:
         explicit ring_buffer_provider(::io_uring* ring, std::optional<uring_buffer_ring_config> config_opt)
@@ -2204,7 +2193,6 @@ private:
                     _buffers.emplace_back(new_buf(ring_buffer_size));
                     ::io_uring_buf_ring_add(_buffer_ring, _buffers[i]->get_write(), ring_buffer_size, i, _mask, i);
                 }
-                _allocated_buffers = ring_entries;
                 ::io_uring_buf_ring_advance(_buffer_ring, ring_entries);
             }
         }
@@ -2250,7 +2238,16 @@ private:
         }
 
         ~ring_buffer_provider() noexcept {
-            reset();
+            if (_buffer_ring) {
+                int ret = ::io_uring_free_buf_ring(_uring, _buffer_ring, ring_entries, s_buffer_group_id);
+                if (ret != 0) {
+                    seastar_logger.warn("freeing io_uring buffer ring failed: {}", std::system_error(-ret, std::generic_category(), "io_uring_free_buf_ring"));
+                }
+                _buffer_ring = nullptr;
+            }
+            _buffers.clear();
+            _free_slots.clear();
+            _reserved_buffer_count = 0;
         }
     };
     ring_buffer_provider _uring_buffer_ring;
@@ -2327,6 +2324,7 @@ public:
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size_in_bytes(), _uring_buffer_ring.buf_group());
+            seastar_logger.info("Submitting buf ring read some");
             return submit_request(std::move(desc), std::move(req));
         }
         auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
@@ -2353,6 +2351,7 @@ public:
         if (_uring_buffer_ring.reserve()) {
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size_in_bytes(), 0, _uring_buffer_ring.buf_group());
+            seastar_logger.info("Submitting buf ring recv some");
             return submit_request(std::move(desc), std::move(req));
         }
         auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());

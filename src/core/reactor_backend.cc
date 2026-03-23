@@ -2324,7 +2324,6 @@ public:
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             const uint64_t position_file_offset = -1;
             auto req = internal::io_request::make_uring_buf_group_read(fd.fd.get(), position_file_offset, _uring_buffer_ring.buffer_size_in_bytes(), _uring_buffer_ring.buf_group());
-            seastar_logger.info("Submitting buf ring read some");
             return submit_request(std::move(desc), std::move(req));
         }
         auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());
@@ -2351,7 +2350,6 @@ public:
         if (_uring_buffer_ring.reserve()) {
             auto desc = std::make_unique<uring::buf_group_io_completion>(fd);
             auto req = internal::io_request::make_uring_buf_group_recv(fd.fd.get(), _uring_buffer_ring.buffer_size_in_bytes(), 0, _uring_buffer_ring.buf_group());
-            seastar_logger.info("Submitting buf ring recv some");
             return submit_request(std::move(desc), std::move(req));
         }
         auto desc = std::make_unique<read_completion_base>(ba->allocate_buffer());

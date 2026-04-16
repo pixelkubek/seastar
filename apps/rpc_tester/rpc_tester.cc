@@ -517,7 +517,6 @@ class job_rpc_streaming : public job {
     std::function<future<>(unsigned, const payload_t&)> _call;
     std::chrono::steady_clock::time_point _stop;
     uint64_t _total_messages = 0;
-    uint64_t _payload_size_bytes = 0;
     std::chrono::steady_clock::time_point _start_time{};
     std::chrono::duration<double> _total_duration{0.0};
     payload_t _payload;
@@ -529,7 +528,6 @@ public:
             , _ccfg(ccfg)
             , _rpc(rpc)
             , _stop(std::chrono::steady_clock::now() + _cfg.duration)
-            , _payload_size_bytes(_cfg.payload)
             , _payload(_cfg.payload / sizeof(payload_t::value_type), 0) {
         if (_cfg.verb == "bidirectional") {
             _call = [this] (unsigned worker_id, const payload_t& payload) {

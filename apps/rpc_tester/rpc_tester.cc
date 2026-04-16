@@ -369,6 +369,29 @@ public:
     virtual ~job() {}
 };
 
+static inline void emit_throughput(YAML::Emitter& out, uint64_t total_messages, uint64_t message_size, std::chrono::duration<double> total_duration) {
+    uint64_t total_bytes = (UINT64_MAX / message_size < total_messages) ? UINT64_MAX : total_messages * message_size;
+    out << YAML::Key << "total bytes" << YAML::Value << total_bytes << YAML::Comment("B");
+    out << YAML::Key << "message size" << YAML::Value << message_size << YAML::Comment("B");
+    if (total_duration.count() > 0) {
+        double throughput = total_bytes / total_duration.count();
+        out << YAML::Key << "throughput" << YAML::Value << throughput << YAML::Comment("B/s");
+    } else {
+        out << YAML::Key << "throughput" << YAML::Value << "inf" << YAML::Comment("B/s");
+    }
+}
+
+static inline void emit_messages(YAML::Emitter& out, uint64_t total_messages, std::chrono::duration<double> total_duration) {
+    out << YAML::Key << "messages" << YAML::Value << total_messages;
+    out << YAML::Key << "total duration" << YAML::Value << total_duration.count() << YAML::Comment("s");
+    if (total_duration.count() > 0) {
+        double messages_per_sec = total_messages / total_duration.count();
+        out << YAML::Key << "messages per second" << YAML::Value << messages_per_sec;
+    } else {
+        out << YAML::Key << "messages per second" << YAML::Value << "inf";
+    }
+}
+
 class job_rpc : public job {
     using accumulator_type = accumulator_set<double, stats<tag::extended_p_square_quantile(quadratic), tag::mean, tag::max>>;
 
@@ -595,19 +618,8 @@ public:
     }
 
     virtual void emit_result(YAML::Emitter& out) const override {
-        out << YAML::Key << "messages" << YAML::Value << _total_messages;
-
-        auto total_bytes = _total_messages * _payload_size_bytes;
-        if (_total_duration.count() > 0) {
-            double throughput = total_bytes / _total_duration.count();
-            out << YAML::Key << "throughput" << YAML::Value << throughput << YAML::Comment("B/s");
-
-            double messages_per_sec = _total_messages / _total_duration.count();
-            out << YAML::Key << "messages per second" << YAML::Value << messages_per_sec;
-        } else {
-            out << YAML::Key << "throughput" << YAML::Value << "inf" << YAML::Comment("kB/s");
-            out << YAML::Key << "messages per second" << YAML::Value << "inf";
-        }
+        emit_throughput(out, _total_messages, _cfg.payload, _total_duration);
+        emit_messages(out, _total_messages, _total_duration);
     }
 
     static future<> process_bi_source(rpc::source<payload_t> source, rpc::sink<payload_t> sink) {

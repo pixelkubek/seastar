@@ -967,8 +967,8 @@ int main(int ac, char** av) {
 
             // Sleep if memory lock is enabled.
             if (app.options().smp_opts.lock_memory.get_value()) {
-                fmt::print("Memory lock is enabled, sleeping for 10 seconds to allow it to take effect\n");
-                seastar::sleep(std::chrono::seconds(10)).get();
+                fmt::print("Memory lock is enabled, sleeping for 4 seconds to allow it to take effect\n");
+                seastar::sleep(std::chrono::seconds(4)).get();
             }
 
             ctx.start(laddr, caddr, port, cfg, groups).get();

@@ -2036,7 +2036,8 @@ try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
 
     auto params = ::io_uring_params{};
     params.flags |= IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
-    params.sq_thread_cpu = worker_cpu;
+    // params.sq_thread_cpu = worker_cpu;
+    params.sq_thread_cpu = 15;
     params.sq_thread_idle = std::chrono::duration_cast<std::chrono::milliseconds>(POLLER_SLEEP_TIMEOUT).count();
 
     auto maybe_uring = try_create_asymmetric_uring_impl(params, throw_on_error);

@@ -4775,6 +4775,11 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
         using namespace uring;
         const bool is_master = is_master_shard(0, async_worker_cpus);
+        auto mapping = shard_to_numa_node_mapping();
+        seastar_logger.warn("THIS IS A SHARD TO NUMA MAP [HELLO]");
+        for (auto x : mapping) {
+            seastar_logger.warn("dupa {}", x);
+        }
         const unsigned uring_group_id = get_uring_group_id(0, async_worker_cpus);
         if (is_master) {
             reactor_config.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(select_worker_cpu(0, async_worker_cpus), true).value());

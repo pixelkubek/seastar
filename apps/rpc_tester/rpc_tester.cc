@@ -815,7 +815,11 @@ public:
             return make_ready_future<uint64_t>(val);
         });
         _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
-            return make_ready_future<uint64_t>(val.size());
+            return seastar::do_with(std::move(val), [] (payload_t& val) {
+                return seastar::sleep(std::chrono::microseconds(2)).then([&val] {
+                    return make_ready_future<uint64_t>(val.size());
+                });
+            });
         });
         _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
             // Create sink for server->client direction

@@ -818,9 +818,11 @@ public:
         });
         _rpc->register_handler(rpc_verb::WRITE, [this] (payload_t val) {
             return seastar::do_with(std::move(val), [this] (payload_t& val) {
-                return seastar::sleep(_write_delay).then([&val] {
-                    return make_ready_future<uint64_t>(val.size());
-                });
+                auto start = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - start < _write_delay) {
+                    // busy-wait to burn CPU
+                }
+                return make_ready_future<uint64_t>(val.size());
             });
         });
         _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {

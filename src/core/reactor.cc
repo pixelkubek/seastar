@@ -4859,10 +4859,12 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
             seastar_logger.warn("[NUUMA] shard {}, is_master: {}, uring_group_id: {}, worker_cpu: {}", i, uring_assignments->is_master_shard[i], uring_assignments->shard_to_networking_group[i], uring_assignments->shard_to_networking_core[i]);
         }
 
-        auto mapping = shard_to_numa_node_mapping();
-        seastar_logger.warn("THIS IS A SHARD TO NUMA MAP [HELLO]");
-        for (auto x : mapping) {
-            seastar_logger.warn("dupa {}", x);
+        seastar_logger.warn("[NUUMA] THIS IS A SHARD TO NUMA MAP");
+        for (auto const& [node, cpus] : resources.numa_node_id_to_cpuset) {
+            seastar_logger.warn("[NUUMA] node {}", node);
+            for (auto cpu : cpus) {
+                seastar_logger.warn("[NUUMA]    cpu {}", cpu);
+            }
         }
 
         const bool is_master = uring_assignments->is_master_shard[0];

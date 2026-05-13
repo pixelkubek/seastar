@@ -4854,6 +4854,11 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
         uring_assignments = std::make_shared<numa_assignment>(
             compute_assignments(_shard_count, allocations, cpu_to_ht_id, cpu_to_numa_node, async_worker_cpus));
 
+        seastar_logger.warn("[NUUMA] computed assignment:");
+        for (size_t i = 0; i < uring_assignments->is_master_shard.size(); ++i) {
+            seastar_logger.warn("[NUUMA] shard {}, is_master: {}, uring_group_id: {}, worker_cpu: {}", i, uring_assignments->is_master_shard[i], uring_assignments->shard_to_networking_group[i], uring_assignments->shard_to_networking_core[i]);
+        }
+
         const bool is_master = uring_assignments->is_master_shard[0];
         const unsigned uring_group_id = uring_assignments->shard_to_networking_group[0];
         const unsigned worker_cpu = uring_assignments->shard_to_networking_core[0];

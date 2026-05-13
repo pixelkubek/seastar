@@ -2101,6 +2101,22 @@ numa_assignment compute_assignments(
     result.shard_to_networking_group.resize(num_shards);
     result.is_master_shard.assign(num_shards, false);
 
+    seastar_logger.warn("[CALC] Beginning computation of assignment...");
+    seastar_logger.warn("[CALC] Parameters:");
+    seastar_logger.warn("[CALC] num_shards: {}", num_shards);
+    seastar_logger.warn("[CALC] cpu_to_ht_id:");
+    for (auto const& [cpu, ht_id] : cpu_to_ht_id) {
+        seastar_logger.warn("[CALC]     cpu {}, ht_id {}", cpu, ht_id);
+    }
+    seastar_logger.warn("[CALC] cpu_to_numa_node:");
+    for (auto const& [cpu, numa_node] : cpu_to_numa_node) {
+        seastar_logger.warn("[CALC]     cpu {}, numa_node {}", cpu, numa_node);
+    }
+    seastar_logger.warn("[CALC] networking cores:");
+    for (auto netcore : networking_cores) {
+        seastar_logger.warn("[CALC]     netcore {}", netcore);
+    }
+
     const std::vector<unsigned> sorted_networking_cores(
         networking_cores.begin(),
         networking_cores.end());

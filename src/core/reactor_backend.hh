@@ -396,11 +396,18 @@ try_create_attached_asymmetric_uring(int uring_fd, bool throw_on_error);
 std::optional<::io_uring>
 try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error);
 
-unsigned select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus);
+struct numa_assignment {
+    std::vector<unsigned> shard_to_networking_core;
+    std::vector<unsigned> shard_to_networking_group;
+    std::vector<bool> is_master_shard;
+};
 
-bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;
-
-unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept;
+numa_assignment compute_assignments(
+    unsigned num_shards,
+    const std::vector<resource::cpu>& allocations,
+    const std::unordered_map<unsigned, unsigned>& cpu_to_ht_id,
+    const std::unordered_map<unsigned, unsigned>& cpu_to_numa_node,
+    const resource::cpuset& networking_cores);
 
 // QUEUE_LEN is more or less arbitrary. Too low and we'll be
 // issuing too small batches, too high and we require too much locked

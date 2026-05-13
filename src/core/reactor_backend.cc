@@ -22,8 +22,11 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <set>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -2080,20 +2083,167 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, compile_safe
     }
 }
 
-unsigned
-select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
-    SEASTAR_ASSERT(!worker_cpus.empty());
-    const size_t selected_cpu_rank = get_uring_group_id(shard_id, worker_cpus);
-    return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
+// NUMA start
+
+numa_assignment compute_assignments(
+    unsigned num_shards,
+    const std::vector<resource::cpu>& allocations,
+    const std::unordered_map<unsigned, unsigned>& cpu_to_ht_id,
+    const std::unordered_map<unsigned, unsigned>& cpu_to_numa_node,
+    const resource::cpuset& networking_cores)
+{
+    SEASTAR_ASSERT(num_shards == allocations.size());
+    SEASTAR_ASSERT(!networking_cores.empty());
+
+    numa_assignment result;
+
+    result.shard_to_networking_core.resize(num_shards);
+    result.shard_to_networking_group.resize(num_shards);
+    result.is_master_shard.assign(num_shards, false);
+
+    const std::vector<unsigned> sorted_networking_cores(
+        networking_cores.begin(),
+        networking_cores.end());
+
+    std::unordered_map<unsigned, std::vector<unsigned>> ht_to_net;
+    std::unordered_map<unsigned, std::vector<unsigned>> numa_to_net;
+
+    for (unsigned core : sorted_networking_cores) {
+        auto ht_it = cpu_to_ht_id.find(core);
+        auto numa_it = cpu_to_numa_node.find(core);
+        if (ht_it != cpu_to_ht_id.end()) {
+            ht_to_net[ht_it->second].push_back(core);
+        }
+        if (numa_it != cpu_to_numa_node.end()) {
+            numa_to_net[numa_it->second].push_back(core);
+        }
+    }
+
+    std::unordered_map<unsigned, std::vector<unsigned>> net_to_shards;
+    std::vector<bool> is_shard_assigned(num_shards, false);
+
+    auto choose_least_loaded =
+        [&](const std::vector<unsigned>& candidates)
+    {
+        SEASTAR_ASSERT(!candidates.empty());
+        unsigned best = candidates.front();
+        size_t best_load = net_to_shards[best].size();
+
+        for (unsigned c : candidates) {
+            size_t load = net_to_shards[c].size();
+            if (load < best_load || (load == best_load && c < best)) {
+                best = c;
+                best_load = load;
+            }
+        }
+
+        return best;
+    };
+
+    auto assign_pass =
+        [&](auto&& candidate_selector)
+    {
+        for (unsigned shard = 0; shard < num_shards; ++shard) {
+            if (is_shard_assigned[shard]) {
+                continue;
+            }
+
+            auto candidates = candidate_selector(shard);
+
+            if (candidates.empty()) {
+                continue;
+            }
+
+            unsigned net =
+                choose_least_loaded(candidates);
+
+            result.shard_to_networking_core[shard] = net;
+
+            net_to_shards[net].push_back(shard);
+
+            is_shard_assigned[shard] = true;
+        }
+    };
+
+    // ============================================================
+    // PASS 1: HT-local
+    // ============================================================
+
+    assign_pass([&](unsigned shard)
+    {
+        unsigned cpu = allocations[shard].cpu_id;
+        auto ht_it = cpu_to_ht_id.find(cpu);
+        if (ht_it == cpu_to_ht_id.end()) {
+            return std::vector<unsigned>{};
+        }
+
+        auto it = ht_to_net.find(ht_it->second);
+        if (it != ht_to_net.end()) {
+            return it->second;
+        }
+
+        return std::vector<unsigned>{};
+    });
+
+    // ============================================================
+    // PASS 2: NUMA-local
+    // ============================================================
+
+    assign_pass([&](unsigned shard)
+    {
+        unsigned cpu = allocations[shard].cpu_id;
+        auto numa_it = cpu_to_numa_node.find(cpu);
+        if (numa_it == cpu_to_numa_node.end()) {
+            return std::vector<unsigned>{};
+        }
+
+        auto it = numa_to_net.find(numa_it->second);
+        if (it != numa_to_net.end()) {
+            return it->second;
+        }
+
+        return std::vector<unsigned>{};
+    });
+
+    // ============================================================
+    // PASS 3: global
+    // ============================================================
+
+    assign_pass([&](unsigned)
+    {
+        return sorted_networking_cores;
+    });
+
+    for (unsigned shard = 0; shard < num_shards; ++shard) {
+        SEASTAR_ASSERT(is_shard_assigned[shard]);
+    }
+
+    // ============================================================
+    // Masters + groups
+    // ============================================================
+
+    unsigned group = 0;
+
+    for (unsigned net : sorted_networking_cores) {
+        auto& shards = net_to_shards[net];
+
+        for (size_t i = 0; i < shards.size(); ++i) {
+            unsigned shard = shards[i];
+
+            result.shard_to_networking_group[shard] = group;
+
+            if (i == 0) {
+                result.is_master_shard[shard] = true;
+            }
+        }
+
+        ++group;
+    }
+
+    return result;
 }
 
-bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id < worker_cpus.size();
-}
-
-unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id % worker_cpus.size();
-}
+// NUMA end
 
 } // namespace uring
 

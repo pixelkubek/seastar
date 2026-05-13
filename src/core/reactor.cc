@@ -4426,22 +4426,49 @@ static inline async_worker_allocation allocate_async_workers(const reactor_backe
 }
 
 #ifdef SEASTAR_HAVE_URING
+static std::optional<unsigned> read_cpu_numa_node_sysfs(unsigned cpu) {
+    namespace fs = std::filesystem;
+    try {
+        const fs::path cpu_path = fs::path("/sys/devices/system/cpu") / ("cpu" + std::to_string(cpu));
+        for (const auto& entry : fs::directory_iterator(cpu_path)) {
+            auto name = entry.path().filename().string();
+            if (name.rfind("node", 0) != 0) {
+                continue;
+            }
+            auto id_str = name.substr(4);
+            if (id_str.empty()) {
+                continue;
+            }
+            size_t idx = 0;
+            unsigned node = std::stoul(id_str, &idx);
+            if (idx == id_str.size()) {
+                return node;
+            }
+        }
+    } catch (...) {
+    }
+
+    return std::nullopt;
+}
+
 static std::unordered_map<unsigned, unsigned>
 build_cpu_to_numa_node(const resource::cpuset& all_cpus,
         const std::unordered_map<unsigned, resource::cpuset>& numa_node_id_to_cpuset) {
     std::unordered_map<unsigned, unsigned> cpu_to_numa_node;
-    for (const auto& [node, cpus] : numa_node_id_to_cpuset) {
-        for (unsigned cpu : cpus) {
-            if (all_cpus.contains(cpu)) {
-                cpu_to_numa_node[cpu] = node;
+    for (unsigned cpu : all_cpus) {
+        if (auto node = read_cpu_numa_node_sysfs(cpu)) {
+            cpu_to_numa_node[cpu] = *node;
+            continue;
+        }
+
+        unsigned node = 0;
+        for (const auto& [numa_id, cpus] : numa_node_id_to_cpuset) {
+            if (cpus.contains(cpu)) {
+                node = numa_id;
+                break;
             }
         }
-    }
-
-    for (unsigned cpu : all_cpus) {
-        if (!cpu_to_numa_node.contains(cpu)) {
-            cpu_to_numa_node[cpu] = 0;
-        }
+        cpu_to_numa_node[cpu] = node;
     }
 
     return cpu_to_numa_node;

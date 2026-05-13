@@ -4867,6 +4867,11 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
             }
         }
 
+        seastar_logger.warn("[NUUMA] THIS IS A SHARD TO CPU MAP");
+        for (size_t i = 0; i < allocations.size(); ++i) {
+            seastar_logger.warn("[NUUMA] shard: {}, cpu: {}", i, allocations[i].cpu_id);
+        }
+
         const bool is_master = uring_assignments->is_master_shard[0];
         const unsigned uring_group_id = uring_assignments->shard_to_networking_group[0];
         const unsigned worker_cpu = uring_assignments->shard_to_networking_core[0];

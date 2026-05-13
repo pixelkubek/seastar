@@ -4856,7 +4856,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
 
         seastar_logger.warn("[NUUMA] computed assignment:");
         for (size_t i = 0; i < uring_assignments->is_master_shard.size(); ++i) {
-            seastar_logger.warn("[NUUMA] shard {}, cpu {}, is_master: {}, uring_group_id: {}, worker_cpu: {}", i, allocations[i].cpu_id, uring_assignments->is_master_shard[i], uring_assignments->shard_to_networking_group[i], uring_assignments->shard_to_networking_core[i]);
+            seastar_logger.warn("[NUUMA] shard {}, cpu {}, is_master: {}, uring_group_id: {}, worker_cpu: {}", i, allocations[i].cpu_id, (uring_assignments->is_master_shard[i] ? 1 : 0), uring_assignments->shard_to_networking_group[i], uring_assignments->shard_to_networking_core[i]);
         }
 
         seastar_logger.warn("[NUUMA] THIS IS A SHARD TO NUMA MAP");

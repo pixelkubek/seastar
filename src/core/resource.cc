@@ -508,7 +508,7 @@ void topology_holder::init_and_load() {
     // hwloc_topology_destroy is required after hwloc_topology_init
     // on success, _topology will not be null anymore
 
-    hwloc_topology_set_synthetic(&_topology, "node:4 pu:4");
+    hwloc_topology_set_synthetic(_topology, "node:4 pu:4");
 
     hwloc_topology_load(_topology);
 }

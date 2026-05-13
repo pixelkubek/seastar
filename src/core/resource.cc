@@ -362,6 +362,38 @@ static std::unordered_map<hwloc_obj_t, std::vector<unsigned>> break_cpus_into_gr
     return groups;
 }
 
+std::unordered_map<unsigned, unsigned>
+cpu_to_ht_id(hwloc_topology_t topology, const cpuset& cpus) {
+    std::vector<unsigned> cpu_list(cpus.begin(), cpus.end());
+    auto groups = break_cpus_into_groups(topology, cpu_list, HWLOC_OBJ_CORE);
+    std::unordered_map<unsigned, unsigned> cpu_to_ht_id;
+
+    for (auto& [core, group_cpus] : groups) {
+        if (group_cpus.empty()) {
+            continue;
+        }
+
+        unsigned leader = group_cpus.front();
+        for (unsigned cpu : group_cpus) {
+            if (cpu < leader) {
+                leader = cpu;
+            }
+        }
+
+        for (unsigned cpu : group_cpus) {
+            cpu_to_ht_id[cpu] = leader;
+        }
+    }
+
+    for (unsigned cpu : cpus) {
+        if (!cpu_to_ht_id.contains(cpu)) {
+            cpu_to_ht_id[cpu] = cpu;
+        }
+    }
+
+    return cpu_to_ht_id;
+}
+
 struct distribute_objects {
     std::vector<hwloc_cpuset_t> cpu_sets;
     hwloc_obj_t root;

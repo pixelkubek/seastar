@@ -132,6 +132,10 @@ struct resources {
 resources allocate(configuration& c);
 unsigned nr_processing_units(configuration& c);
 
+#ifdef SEASTAR_HAVE_HWLOC
+std::unordered_map<unsigned, unsigned> cpu_to_ht_id(hwloc_topology_t topology, const cpuset& cpus);
+#endif
+
 
 std::optional<resource::cpuset> parse_cpuset(std::string value);
 

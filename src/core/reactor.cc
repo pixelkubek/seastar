@@ -4448,23 +4448,20 @@ build_cpu_to_numa_node(const resource::cpuset& all_cpus,
 }
 
 static std::unordered_map<unsigned, unsigned>
-build_cpu_to_ht_id(const resource::cpuset& all_cpus) {
+build_cpu_to_ht_id(const resource::cpuset& all_cpus
+#ifdef SEASTAR_HAVE_HWLOC
+        , hwloc_topology_t topology
+#endif
+        ) {
+#ifdef SEASTAR_HAVE_HWLOC
+    return resource::cpu_to_ht_id(topology, all_cpus);
+#else
     std::unordered_map<unsigned, unsigned> cpu_to_ht_id;
     for (unsigned cpu : all_cpus) {
-        try {
-            std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu)
-                + "/topology/thread_siblings_list";
-            auto line = read_first_line(path);
-            auto siblings = resource::parse_cpuset(std::string(line));
-            if (siblings && !siblings->empty()) {
-                cpu_to_ht_id.emplace(cpu, *siblings->begin());
-                continue;
-            }
-        } catch (...) {
-        }
         cpu_to_ht_id.emplace(cpu, cpu);
     }
     return cpu_to_ht_id;
+#endif
 }
 #endif
 
@@ -4849,7 +4846,11 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
         }
 
         auto cpu_to_numa_node = build_cpu_to_numa_node(all_cpus, resources.numa_node_id_to_cpuset);
+    #ifdef SEASTAR_HAVE_HWLOC
+        auto cpu_to_ht_id = build_cpu_to_ht_id(all_cpus, rc.topology.get());
+    #else
         auto cpu_to_ht_id = build_cpu_to_ht_id(all_cpus);
+    #endif
 
         uring_assignments = std::make_shared<numa_assignment>(
             compute_assignments(_shard_count, allocations, cpu_to_ht_id, cpu_to_numa_node, async_worker_cpus));

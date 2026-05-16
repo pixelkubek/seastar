@@ -34,6 +34,7 @@
 #include <ranges>
 #include <regex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <barrier>
 #include <any>
@@ -4789,14 +4790,24 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     auto master_uring_fds = std::make_shared<std::vector<int>>(_shard_count, -1);
 
     auto reactor_config = reactor_cfg;
+#ifdef SEASTAR_HAVE_URING
+    using uring_assignment_ptr = std::shared_ptr<uring::numa_assignment>;
+#else
+    using uring_assignment_ptr = std::shared_ptr<void>;
+#endif
+    uring_assignment_ptr uring_assignments;
 
 #ifdef SEASTAR_HAVE_URING
     if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
         using namespace uring;
-        const bool is_master = is_master_shard(0, async_worker_cpus);
-        const unsigned uring_group_id = get_uring_group_id(0, async_worker_cpus);
+
+        uring_assignments = std::make_shared<numa_assignment>(compute_assignments(allocations, async_worker_cpus));
+
+        const bool is_master = uring_assignments->is_master_shard[0];
+        const unsigned uring_group_id = uring_assignments->shard_to_networking_group[0];
+        const unsigned worker_cpu = uring_assignments->shard_to_networking_core[0];
         if (is_master) {
-            reactor_config.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(select_worker_cpu(0, async_worker_cpus), true).value());
+            reactor_config.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(worker_cpu, true).value());
             (*master_uring_fds)[uring_group_id] = std::any_cast<::io_uring>(std::get<compile_safe_io_uring>(reactor_config.asymmetric_uring)).ring_fd;
         }
     }
@@ -4807,7 +4818,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     smp::_this_smp = this;
     for (i = 1; i < _shard_count; i++) {
         auto allocation = allocations[i];
-        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, &async_worker_cpus, &master_uring_fds, &asymmetric_uring_masters_created] {
+        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, uring_assignments, &master_uring_fds, &asymmetric_uring_masters_created] {
           try {
             // initialize thread_locals that are equal across all reacto threads of this smp instance
             smp::_tmain = smp_tmain;
@@ -4843,10 +4854,12 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
 #ifdef SEASTAR_HAVE_URING
             if (reactor_opts.reactor_backend.get_selected_candidate().name() == "asymmetric_io_uring") {
                 using namespace uring;
-                const bool is_master = is_master_shard(i, async_worker_cpus);
-                const unsigned uring_group_id = get_uring_group_id(i, async_worker_cpus);
+                SEASTAR_ASSERT(uring_assignments);
+                const bool is_master = uring_assignments->is_master_shard[i];
+                const unsigned uring_group_id = uring_assignments->shard_to_networking_group[i];
+                const unsigned worker_cpu = uring_assignments->shard_to_networking_core[i];
                 if (is_master) {
-                    reactor_config.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(select_worker_cpu(i, async_worker_cpus), true).value());
+                    reactor_config.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(worker_cpu, true).value());
                     (*master_uring_fds)[uring_group_id] = std::any_cast<::io_uring>(std::get<compile_safe_io_uring>(reactor_config.asymmetric_uring)).ring_fd;
                 }
 
@@ -4886,8 +4899,10 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
         using namespace uring;
         asymmetric_uring_masters_created.arrive_and_wait();
 
-        if (!is_master_shard(0, async_worker_cpus)) {
-            reactor_config.asymmetric_uring.emplace<int>((*master_uring_fds)[get_uring_group_id(0, async_worker_cpus)]);
+        SEASTAR_ASSERT(uring_assignments);
+        if (!uring_assignments->is_master_shard[0]) {
+            const unsigned uring_group_id = uring_assignments->shard_to_networking_group[0];
+            reactor_config.asymmetric_uring.emplace<int>((*master_uring_fds)[uring_group_id]);
         }
     }
 #endif

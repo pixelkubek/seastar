@@ -22,8 +22,12 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <set>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <variant>
+#include <vector>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/epoll.h>
@@ -36,6 +40,11 @@
 
 #ifdef SEASTAR_HAVE_URING
 #include <liburing.h>
+#include <liburing/io_uring.h>
+#endif
+
+#ifdef SEASTAR_HAVE_HWLOC
+#include <hwloc.h>
 #endif
 
 #include "core/reactor_backend.hh"
@@ -2086,19 +2095,171 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, compile_safe
     }
 }
 
-unsigned
-select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
-    SEASTAR_ASSERT(!worker_cpus.empty());
-    const size_t selected_cpu_rank = get_uring_group_id(shard_id, worker_cpus);
-    return *std::next(worker_cpus.cbegin(), selected_cpu_rank);
-}
+numa_assignment compute_assignments(const std::vector<resource::cpu>& allocations, const resource::cpuset& networking_cores) {
+    SEASTAR_ASSERT(!networking_cores.empty());
 
-bool is_master_shard(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id < worker_cpus.size();
-}
+    unsigned num_shards = allocations.size();
+    numa_assignment result;
 
-unsigned get_uring_group_id(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) noexcept {
-    return shard_id % worker_cpus.size();
+    // Calculate CPU to SMT/NUMA maps
+    resource::cpuset all_cpus = networking_cores;
+    for (const auto& cpu : allocations) {
+        all_cpus.insert(cpu.cpu_id);
+    }
+
+    std::unordered_map<unsigned, unsigned> cpu_to_smt_id;
+    std::unordered_map<unsigned, unsigned> cpu_to_numa_node;
+#ifdef SEASTAR_HAVE_HWLOC
+    hwloc_topology_t topology;
+
+    hwloc_topology_init(&topology);
+    hwloc_topology_load(topology);
+
+    for (unsigned cpu : all_cpus) {
+        hwloc_obj_t pu = hwloc_get_pu_obj_by_os_index(topology, cpu);
+
+        if (!pu) {
+            cpu_to_numa_node[cpu] = 0;
+            cpu_to_smt_id[cpu] = cpu;
+            continue;
+        }
+
+        hwloc_obj_t numa = hwloc_get_ancestor_obj_by_type(topology, HWLOC_OBJ_NUMANODE, pu);
+        hwloc_obj_t core = hwloc_get_ancestor_obj_by_type(topology, HWLOC_OBJ_CORE, pu);
+
+        cpu_to_numa_node[cpu] = numa ? numa->logical_index : 0;
+        cpu_to_smt_id[cpu] = core ? core->logical_index : cpu;
+    }
+
+    hwloc_topology_destroy(topology);
+#else
+    for (auto cpu : all_cpus) {
+        cpu_to_numa_node[cpu] = 0;
+        cpu_to_smt_id[cpu] = cpu;
+    }
+#endif
+
+    result.shard_to_networking_core.resize(num_shards);
+    result.shard_to_networking_group.resize(num_shards);
+    result.is_master_shard.assign(num_shards, false);
+
+    const std::vector<unsigned> sorted_networking_cores(networking_cores.begin(), networking_cores.end());
+
+    std::unordered_map<unsigned, std::vector<unsigned>> smt_to_net;
+    std::unordered_map<unsigned, std::vector<unsigned>> numa_to_net;
+
+    for (unsigned core : sorted_networking_cores) {
+        auto smt_it = cpu_to_smt_id.find(core);
+        auto numa_it = cpu_to_numa_node.find(core);
+        if (smt_it != cpu_to_smt_id.end()) {
+            smt_to_net[smt_it->second].push_back(core);
+        }
+        if (numa_it != cpu_to_numa_node.end()) {
+            numa_to_net[numa_it->second].push_back(core);
+        }
+    }
+
+    std::unordered_map<unsigned, std::vector<unsigned>> net_to_shards;
+    std::vector<bool> is_shard_assigned(num_shards, false);
+
+    auto choose_least_loaded = [&](const std::vector<unsigned>& candidates) {
+        SEASTAR_ASSERT(!candidates.empty());
+        unsigned best = candidates.front();
+        size_t best_load = net_to_shards[best].size();
+
+        for (unsigned c : candidates) {
+            size_t load = net_to_shards[c].size();
+            if (load < best_load || (load == best_load && c < best)) {
+                best = c;
+                best_load = load;
+            }
+        }
+
+        return best;
+    };
+
+    auto assign_pass = [&](auto&& candidate_selector) {
+        for (unsigned shard = 0; shard < num_shards; ++shard) {
+            if (is_shard_assigned[shard]) {
+                continue;
+            }
+
+            auto candidates = candidate_selector(shard);
+            if (candidates.empty()) {
+                continue;
+            }
+
+            unsigned net = choose_least_loaded(candidates);
+            result.shard_to_networking_core[shard] = net;
+            net_to_shards[net].push_back(shard);
+            is_shard_assigned[shard] = true;
+        }
+    };
+
+    // If an application core has a SMT sibling that is a networking core, it should delegate its I/O to it.
+
+    assign_pass([&](unsigned shard) {
+        unsigned cpu = allocations[shard].cpu_id;
+        auto smt_it = cpu_to_smt_id.find(cpu);
+        if (smt_it == cpu_to_smt_id.end()) {
+            return std::vector<unsigned>{};
+        }
+
+        auto net_it = smt_to_net.find(smt_it->second);
+        if (net_it != smt_to_net.end()) {
+            return net_it->second;
+        }
+
+        return std::vector<unsigned>{};
+    });
+
+    // Remaining application cores should be distributed evenly among networking cores on their NUMA nodes.
+
+    assign_pass([&](unsigned shard) {
+        unsigned cpu = allocations[shard].cpu_id;
+        auto numa_it = cpu_to_numa_node.find(cpu);
+        if (numa_it == cpu_to_numa_node.end()) {
+            return std::vector<unsigned>{};
+        }
+
+        auto it = numa_to_net.find(numa_it->second);
+        if (it != numa_to_net.end()) {
+            return it->second;
+        }
+
+        return std::vector<unsigned>{};
+    });
+
+    // If there is no networking core on a NUMA node, the application cores from this node should be delegated to other networking cores.
+
+    assign_pass([&](unsigned) {
+        return sorted_networking_cores;
+    });
+
+    for (unsigned shard = 0; shard < num_shards; ++shard) {
+        SEASTAR_ASSERT(is_shard_assigned[shard]);
+    }
+
+    // Shard with the lowest id in each networking group becomes a master.
+
+    unsigned group = 0;
+
+    for (unsigned net : sorted_networking_cores) {
+        auto& shards = net_to_shards[net];
+
+        for (size_t i = 0; i < shards.size(); ++i) {
+            unsigned shard = shards[i];
+            result.shard_to_networking_group[shard] = group;
+
+            if (i == 0) {
+                result.is_master_shard[shard] = true;
+            }
+        }
+
+        ++group;
+    }
+
+    return result;
 }
 
 } // namespace uring

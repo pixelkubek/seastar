@@ -29,6 +29,7 @@
 #include <seastar/core/internal/linux-aio.hh>
 #include <seastar/core/cacheline.hh>
 #include <seastar/core/reactor_config.hh>
+#include <seastar/core/smp_options.hh>
 #include <seastar/util/bool_class.hh>
 #include <seastar/core/shard_id.hh>
 #include <seastar/core/resource.hh>
@@ -371,6 +372,7 @@ public:
 
 class reactor_backend_uring;
 class reactor_backend_asymmetric_uring;
+class reactor_backend_configurator;
 
 class reactor_backend_selector {
     std::string _name;
@@ -386,13 +388,16 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const reactor_backend_selector& rbs) {
         return os << rbs._name;
     }
+    std::shared_ptr<reactor_backend_configurator> configurator(resource::cpuset cpu_set, const reactor_options& reactor_opts, const smp_options& smp_opts) const;
+};
 
-    struct uring_groups_init_result {
-        std::optional<compile_safe_io_uring> ring;
-        unsigned group_id;
-    };
-    uring_groups_init_result init_uring_groups(shard_id id, std::vector<int>& master_uring_fds, const resource::cpuset& async_worker_cpus) const;
-    std::variant<std::monostate, int, compile_safe_io_uring> finalize_uring_groups(uring_groups_init_result init_results, std::vector<int>& master_uring_fds) const;
+class reactor_backend_configurator {
+public:
+    virtual const resource::cpuset& configured_cpuset() const = 0;
+    virtual void verify_allocations(const std::vector<resource::cpu>& allocations) const = 0;
+    virtual void initialize_shard_configuration(shard_id id) = 0;
+    virtual reactor_config finalize_apply_shard_configuration(shard_id id, reactor_config cfg) = 0;
+    virtual ~reactor_backend_configurator() = default;
 };
 
 #ifdef SEASTAR_HAVE_URING

@@ -2366,10 +2366,6 @@ bool reactor_backend_selector::has_enough_aio_nr() {
     return true;
 }
 
-bool reactor_backend_selector::is_asymmetric() const noexcept {
-    return name() == "asymmetric_io_uring";
-}
-
 std::unique_ptr<reactor_backend> reactor_backend_selector::create(reactor& r) {
     if (_name == "io_uring") {
 #ifdef SEASTAR_HAVE_URING

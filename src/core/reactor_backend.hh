@@ -378,7 +378,6 @@ class reactor_backend_selector {
     std::string _name;
 private:
     static bool has_enough_aio_nr();
-    bool is_asymmetric() const noexcept;
     explicit reactor_backend_selector(std::string name) : _name(std::move(name)) {}
 public:
     const std::string& name() const { return _name; }

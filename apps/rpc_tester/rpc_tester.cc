@@ -769,6 +769,7 @@ class context {
     std::vector<std::unique_ptr<job>> _jobs;
     std::unordered_map<std::string, scheduling_group> _sched_groups;
     std::chrono::microseconds _write_delay;
+    size_t cpu_loops = 0;
 
     std::unique_ptr<job> make_job(job_config cfg, std::optional<socket_address> caddr) {
         if (cfg.type == "rpc") {
@@ -821,6 +822,7 @@ public:
                 auto start = std::chrono::steady_clock::now();
                 while (std::chrono::steady_clock::now() - start < _write_delay) {
                     // busy-wait to burn CPU
+                    this->cpu_loops++;
                 }
                 return make_ready_future<uint64_t>(val.size());
             });
@@ -909,6 +911,7 @@ public:
             out << YAML::Key << job->name();
             out << YAML::BeginMap;
             job->emit_result(out);
+            out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
             out << YAML::EndMap;
         }
 

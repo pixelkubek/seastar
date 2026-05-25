@@ -2133,16 +2133,12 @@ class asymmetric_uring_reactor_backend_configurator : public reactor_backend_con
         unsigned group_id;
     };
     std::map<shard_id, uring_groups_init_result> _init_data;
-public:
-    asymmetric_uring_reactor_backend_configurator(resource::cpuset cpu_set, const reactor_options& reactor_opts, const smp_options& smp_opts) 
-        : _cpu_set(std::move(cpu_set))
-        , _async_workers_cpuset(reactor_opts.async_workers_cpuset.get_value())
-        , _master_uring_fds(_async_workers_cpuset.size(), -1)
-    {
-        if (_async_workers_cpuset.empty()) {
-            throw std::runtime_error("No CPUs specified for asymmetric_io_uring workers. Please see --async-workers-cpuset option.");
-        }
 
+    /// @brief If async worker CPUs are allocated and neither --smp nor --cpuset is specified, remove async worker CPUs from the main cpuset to avoid overcommitment by default.
+    /// @param reactor_opts The reactor options, used to check if overprovisioned mode is enabled.
+    /// @param smp_opts The SMP options, used to check if --smp or --cpuset is specified.
+    /// @throws std::invalid_argument if running in overprovisioned mode with async workers allocated and neither --smp nor --cpuset is specified, since this combination might be unintentional.
+    void maybe_remove_overlapping_cpus(const reactor_options& reactor_opts, const smp_options& smp_opts) {
         if (_async_workers_cpuset.size() == 0) {
             return;
         }
@@ -2161,11 +2157,30 @@ public:
 
         seastar_logger.info("Removing async worker CPUs from main cpuset by default (neither --smp nor --cpuset specified)");
         for (auto cpu_id : _async_workers_cpuset) {
-            cpu_set.erase(cpu_id);
+            _cpu_set.erase(cpu_id);
+        }
+    }
+
+    /// Assigns set of cpus for backends that need dedicated async workers.
+    /// Throws if async_workers_cpu_set is empty
+    void allocate_async_workers(const reactor_options& reactor_opts, const smp_options& smp_opts) {
+        if (_async_workers_cpuset.empty()) {
+            throw std::runtime_error("No CPUs specified for asymmetric_io_uring workers. Please see --async-workers-cpuset option.");
         }
 
+        maybe_remove_overlapping_cpus(reactor_opts, smp_opts);
+    }
+
+public:
+    asymmetric_uring_reactor_backend_configurator(resource::cpuset cpu_set, const reactor_options& reactor_opts, const smp_options& smp_opts) 
+        : _cpu_set(std::move(cpu_set))
+        , _async_workers_cpuset(reactor_opts.async_workers_cpuset.get_value())
+        , _master_uring_fds(_async_workers_cpuset.size(), -1)
+    {
+        allocate_async_workers(reactor_opts, smp_opts);
+
         seastar_logger.debug("Backend async workers allocated: {} potential app cores [{}], {} worker cores [{}]",
-                cpu_set.size(), fmt::join(cpu_set, ","),
+                _cpu_set.size(), fmt::join(_cpu_set, ","),
                 _async_workers_cpuset.size(), fmt::join(_async_workers_cpuset, ","));
     }
 

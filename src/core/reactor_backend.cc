@@ -2093,22 +2093,6 @@ try_create_asymmetric_uring(const std::variant<std::monostate, int, ::io_uring>&
     }
 }
 
-bool initialize_uring_groups(shard_id shard, reactor_config& reactor_cfg,
-        const std::shared_ptr<std::vector<int>>& master_uring_fds,
-        const resource::cpuset& async_worker_cpus,
-        unsigned* uring_group_id_out) {
-    const bool is_master = is_master_shard(shard, async_worker_cpus);
-    const unsigned uring_group_id = get_uring_group_id(shard, async_worker_cpus);
-    if (uring_group_id_out) {
-        *uring_group_id_out = uring_group_id;
-    }
-    if (is_master) {
-        reactor_cfg.asymmetric_uring.emplace<compile_safe_io_uring>(try_create_base_asymmetric_uring(select_worker_cpu(shard, async_worker_cpus), true).value());
-        (*master_uring_fds)[uring_group_id] = std::any_cast<::io_uring>(std::get<compile_safe_io_uring>(reactor_cfg.asymmetric_uring)).ring_fd;
-    }
-    return is_master;
-}
-
 unsigned
 select_worker_cpu(seastar::shard_id shard_id, const resource::cpuset& worker_cpus) {
     SEASTAR_ASSERT(!worker_cpus.empty());

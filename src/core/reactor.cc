@@ -4438,8 +4438,9 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
 
     // Let the backend selector allocate async worker cores if needed
     auto backend_selector = reactor_opts.reactor_backend.get_selected_candidate();
-    auto backend_configurator = backend_selector.configurator(cpu_set, reactor_opts, smp_opts);
+    std::shared_ptr<reactor_backend_configurator> backend_configurator;
     try {
+        backend_configurator = backend_selector.configurator(cpu_set, reactor_opts, smp_opts);
         cpu_set = backend_configurator->configured_cpuset();
     } catch (const std::exception& e) {
         seastar_logger.error("{}", e.what());

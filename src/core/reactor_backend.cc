@@ -2083,11 +2083,11 @@ try_create_base_asymmetric_uring(unsigned worker_cpu, bool throw_on_error) {
 
 static
 std::optional<::io_uring>
-try_create_asymmetric_uring(const std::variant<std::monostate, int, compile_safe_io_uring>& variant, bool throw_on_error) {
+try_create_asymmetric_uring(const std::variant<std::monostate, int, ::io_uring>& variant, bool throw_on_error) {
     if (std::holds_alternative<int>(variant)) {
         return try_create_attached_asymmetric_uring(std::get<int>(variant), throw_on_error);
-    } else if (std::holds_alternative<compile_safe_io_uring>(variant)) {
-        return std::any_cast<::io_uring>(std::get<compile_safe_io_uring>(variant));
+    } else if (std::holds_alternative<::io_uring>(variant)) {
+        return std::get<::io_uring>(variant);
     } else {
         return std::nullopt;
     }

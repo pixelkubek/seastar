@@ -913,7 +913,9 @@ public:
             job->emit_result(out);
             out << YAML::EndMap;
         }
-        out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
+        if(cpu_loops > 0) {
+            out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
+        }
 
         return make_ready_future<>();
     }

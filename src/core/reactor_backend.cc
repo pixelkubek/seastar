@@ -2132,7 +2132,7 @@ class asymmetric_uring_reactor_backend_configurator : public reactor_backend_con
         std::optional<compile_safe_io_uring> ring;
         unsigned group_id;
     };
-    std::map<shard_id, uring_groups_init_result> _init_data;
+    std::vector<uring_groups_init_result> _init_data;
 
     /// @brief If async worker CPUs are allocated and neither --smp nor --cpuset is specified, remove async worker CPUs from the main cpuset to avoid overcommitment by default.
     /// @param reactor_opts The reactor options, used to check if overprovisioned mode is enabled.
@@ -2176,6 +2176,7 @@ public:
         : _cpu_set(std::move(cpu_set))
         , _async_workers_cpuset(reactor_opts.async_workers_cpuset.get_value())
         , _master_uring_fds(_async_workers_cpuset.size(), -1)
+        , _init_data(smp_opts.smp ? smp_opts.smp.get_value() : _cpu_set.size(), uring_groups_init_result{})
     {
         allocate_async_workers(reactor_opts, smp_opts);
 
@@ -2217,7 +2218,7 @@ public:
     }
 
     virtual reactor_config finalize_apply_shard_configuration(shard_id shard, reactor_config cfg) override {
-        auto init_result = _init_data.at(shard);
+        auto& init_result = _init_data[shard];
 
         if (init_result.ring.has_value()) { // The shard is a master.
             cfg.asymmetric_uring = init_result.ring.value();

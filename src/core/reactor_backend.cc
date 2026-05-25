@@ -2129,7 +2129,7 @@ class asymmetric_uring_reactor_backend_configurator : public reactor_backend_con
     std::vector<int> _master_uring_fds;
 
     struct uring_groups_init_result {
-        std::optional<compile_safe_io_uring> ring;
+        std::optional<::io_uring> ring;
         unsigned group_id;
     };
     std::vector<uring_groups_init_result> _init_data;

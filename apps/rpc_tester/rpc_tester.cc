@@ -911,9 +911,9 @@ public:
             out << YAML::Key << job->name();
             out << YAML::BeginMap;
             job->emit_result(out);
-            out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
             out << YAML::EndMap;
         }
+        out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
 
         return make_ready_future<>();
     }

@@ -4631,7 +4631,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     }
 #endif
 
-    std::barrier configuration_initialized(_shard_count);
+    std::barrier backend_configuration_initialized(_shard_count);
     // Better to put it into the smp class, but at smp construction time
     // correct _shard_count is not known.
     std::barrier reactors_registered(_shard_count);
@@ -4723,7 +4723,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     smp::_this_smp = this;
     for (i = 1; i < _shard_count; i++) {
         auto allocation = allocations[i];
-        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, backend_configurator, &configuration_initialized] {
+        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, backend_configurator, &backend_configuration_initialized] {
           try {
             // initialize thread_locals that are equal across all reacto threads of this smp instance
             smp::_tmain = smp_tmain;
@@ -4755,7 +4755,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
             lowres_clock::update();
 
             backend_configurator->initialize_shard_configuration(i);
-            configuration_initialized.arrive_and_wait();
+            backend_configuration_initialized.arrive_and_wait();
             auto reactor_config = backend_configurator->finalize_apply_shard_configuration(i, reactor_cfg);
 
             allocate_reactor(i, backend_selector, reactor_config);
@@ -4781,7 +4781,7 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
     init_default_smp_service_group(0);
     lowres_clock::update();
 
-    configuration_initialized.arrive_and_wait();
+    backend_configuration_initialized.arrive_and_wait();
     auto reactor_config = backend_configurator->finalize_apply_shard_configuration(first_shard_id, reactor_cfg);
 
     try {

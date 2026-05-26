@@ -24,7 +24,6 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
-#include <seastar/core/resource.hh>
 #include <thread>
 #include <utility>
 #include <fcntl.h>
@@ -55,6 +54,7 @@
 #include <seastar/core/shard_id.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/read_first_line.hh>
+#include <seastar/core/resource.hh>
 
 namespace seastar {
 

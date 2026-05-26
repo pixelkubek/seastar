@@ -48,7 +48,9 @@ struct reactor_config {
     bool no_poll_aio = false;
     std::optional<bool> aio_nowait_works = false;
     bool abort_on_too_long_task_queue = false;
+#ifdef SEASTAR_HAVE_URING
     std::variant<std::monostate, int, ::io_uring> asymmetric_uring;
+#endif
 };
 /// \endcond
 

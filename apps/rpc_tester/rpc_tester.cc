@@ -768,6 +768,8 @@ class context {
     config _cfg;
     std::vector<std::unique_ptr<job>> _jobs;
     std::unordered_map<std::string, scheduling_group> _sched_groups;
+    std::chrono::microseconds _write_delay;
+    size_t cpu_loops = 0;
 
     std::unique_ptr<job> make_job(job_config cfg, std::optional<socket_address> caddr) {
         if (cfg.type == "rpc") {
@@ -798,10 +800,11 @@ class context {
     }
 
 public:
-    context(std::optional<socket_address> laddr, std::optional<socket_address> caddr, uint16_t port, config cfg, std::unordered_map<std::string, scheduling_group> groups)
+    context(std::optional<socket_address> laddr, std::optional<socket_address> caddr, uint16_t port, config cfg, std::unordered_map<std::string, scheduling_group> groups, std::chrono::microseconds write_delay)
             : _rpc(std::make_unique<rpc_protocol>(serializer{}))
             , _cfg(cfg)
             , _sched_groups(std::move(groups))
+            , _write_delay(write_delay)
     {
         _rpc->register_handler(rpc_verb::HELLO, [this] {
             fmt::print("Got HELLO message from client\n");
@@ -814,8 +817,15 @@ public:
         _rpc->register_handler(rpc_verb::ECHO, [] (uint64_t val) {
             return make_ready_future<uint64_t>(val);
         });
-        _rpc->register_handler(rpc_verb::WRITE, [] (payload_t val) {
-            return make_ready_future<uint64_t>(val.size());
+        _rpc->register_handler(rpc_verb::WRITE, [this] (payload_t val) {
+            return seastar::do_with(std::move(val), [this] (payload_t& val) {
+                auto start = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - start < _write_delay) {
+                    // busy-wait to burn CPU
+                    this->cpu_loops++;
+                }
+                return make_ready_future<uint64_t>(val.size());
+            });
         });
         _rpc->register_handler(rpc_verb::STREAM_BIDIRECTIONAL, [] (rpc::source<payload_t> source) {
             // Create sink for server->client direction
@@ -901,6 +911,7 @@ public:
             out << YAML::Key << job->name();
             out << YAML::BeginMap;
             job->emit_result(out);
+            out << YAML::Key << "cpu loops in WRITE handler" << YAML::Value << cpu_loops;
             out << YAML::EndMap;
         }
 
@@ -919,6 +930,7 @@ int main(int ac, char** av) {
         ("port", bpo::value<int>()->default_value(9123), "port to listen on or connect to")
         ("conf", bpo::value<sstring>()->default_value("./conf.yaml"), "config with jobs and options")
         ("duration", bpo::value<unsigned>()->default_value(30), "duration in seconds")
+        ("write-delay", bpo::value<uint64_t>()->default_value(2), "delay for WRITE handler in microseconds")
     ;
 
     sharded<context> ctx;
@@ -954,6 +966,7 @@ int main(int ac, char** av) {
 
             YAML::Node doc = YAML::LoadFile(conf);
             auto cfg = doc.as<config>();
+            auto write_delay = std::chrono::microseconds(opts["write-delay"].as<uint64_t>());
             std::unordered_map<std::string, scheduling_group> groups;
 
             for (auto&& jc : cfg.jobs) {
@@ -965,7 +978,13 @@ int main(int ac, char** av) {
                 jc.sg = groups[jc.sg_name];
             }
 
-            ctx.start(laddr, caddr, port, cfg, groups).get();
+            // Sleep if memory lock is enabled.
+            if (app.options().smp_opts.lock_memory.get_value()) {
+                fmt::print("Memory lock is enabled, sleeping for 4 seconds to allow it to take effect\n");
+                seastar::sleep(std::chrono::seconds(4)).get();
+            }
+
+            ctx.start(laddr, caddr, port, cfg, groups, write_delay).get();
             ctx.invoke_on_all(&context::start).get();
             ctx.invoke_on_all(&context::run).get();
 

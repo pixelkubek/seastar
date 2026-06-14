@@ -34,6 +34,7 @@
 #include <ranges>
 #include <regex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <barrier>
 #include <memory>
@@ -4747,17 +4748,15 @@ void smp::configure(const smp_options& smp_opts, const reactor_options& reactor_
         }
     };
 
-    auto master_uring_fds = std::make_shared<std::vector<int>>(_shard_count, -1);
-
     const shard_id first_shard_id = 0;
-    backend_configurator->initialize_shard_configuration(first_shard_id);
+    backend_configurator->initialize_shard_configuration_and_topology(first_shard_id, allocations);
 
     unsigned i;
     auto smp_tmain = smp::_tmain;
     smp::_this_smp = this;
     for (i = 1; i < _shard_count; i++) {
         auto allocation = allocations[i];
-        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues, backend_configurator, &backend_configuration_initialized] {
+        create_thread([this, smp_tmain, inited, &reactors_registered, &smp_queues_constructed, &smp_opts, &reactor_opts, &reactors, hugepages_path, i, allocation, assign_io_queues, alloc_io_queues, thread_affinity, heapprof_sampling_rate, mbind, backend_selector, reactor_cfg, &mtx, &layout, use_transparent_hugepages, allocate_qs_owner, allocate_smp_queues] {
           try {
             // initialize thread_locals that are equal across all reacto threads of this smp instance
             smp::_tmain = smp_tmain;
